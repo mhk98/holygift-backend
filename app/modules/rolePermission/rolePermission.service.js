@@ -240,9 +240,12 @@ const getEffectiveMenuPermissions = async (role) => {
     where: { role: normalizedRole },
   });
 
-  // Agents work assigned scratch card claims, so they always get that menu;
-  // the scratch card API limits them to their own claims.
-  const isAgentRole = ["agent", "agents"].includes(normalizeRoleKey(normalizedRole));
+  // Every staff role except admin/superAdmin works assigned scratch card
+  // claims as an agent, so it always gets that menu; the scratch card API
+  // limits them to their own claims. "user" is the storefront customer.
+  const isAgentRole = ![ENUM_USER_ROLE.SUPER_ADMIN, ENUM_USER_ROLE.ADMIN, ENUM_USER_ROLE.USER]
+    .map(normalizeRoleKey)
+    .includes(normalizeRoleKey(normalizedRole));
   const withAgentMenu = (permissions) =>
     isAgentRole ? uniq([...permissions, "scratch_card"]) : permissions;
 

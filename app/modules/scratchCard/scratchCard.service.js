@@ -11,6 +11,9 @@ const { DELIVERY_AREAS, effectiveArea, getDeliveryCharges, chargeFor } = require
 const ScratchCard = () => db.scratchCard;
 
 const PHONE_PATTERN = /^01\d{9}$/;
+// The admin list lets staff pick up to this many rows per page (the shared
+// pagination helper stops at 100).
+const MAX_PAGE_SIZE = 5000;
 
 const countClaimsForPhone = (phone) => ScratchCard().count({ where: { phone } });
 
@@ -107,16 +110,19 @@ const dayRange = (column, from, to) => {
   return from || to ? { [column]: range } : null;
 };
 
-// Agents are created from the admin Roles page, so match the role name loosely
-// ("Agent", "agents", ...).
-const isAgent = (user) => ["agent", "agents"].includes(String(user?.role || "").trim().toLowerCase());
+// Every staff role except admin/superAdmin can be assigned claims and works as
+// an agent. "user" is the storefront customer role, never an agent.
+const NON_AGENT_ROLES = ["superadmin", "admin", "user"];
+const normalizedRole = (user) => String(user?.role || "").trim().toLowerCase();
+const isAgent = (user) => !NON_AGENT_ROLES.includes(normalizedRole(user));
+const isCustomer = (user) => normalizedRole(user) === "user";
 
 const displayName = (user) =>
   [user.FirstName, user.LastName].filter(Boolean).join(" ").trim() || user.Email || user.Phone || `User ${user.Id}`;
 
 const activeAgentsWhere = {
   [Op.and]: [
-    db.sequelize.where(db.sequelize.fn("LOWER", db.sequelize.col("role")), { [Op.in]: ["agent", "agents"] }),
+    db.sequelize.where(db.sequelize.fn("LOWER", db.sequelize.fn("TRIM", db.sequelize.col("role"))), { [Op.notIn]: NON_AGENT_ROLES }),
     db.sequelize.where(db.sequelize.fn("LOWER", db.sequelize.col("status")), "active"),
   ],
 };
@@ -124,10 +130,10 @@ const activeAgentsWhere = {
 const getAgents = async () => {
   const agents = await db.user.findAll({
     where: activeAgentsWhere,
-    attributes: ["Id", "FirstName", "LastName", "Email", "Phone"],
+    attributes: ["Id", "FirstName", "LastName", "Email", "Phone", "role"],
     order: [["FirstName", "ASC"]],
   });
-  return agents.map((agent) => ({ Id: agent.Id, name: displayName(agent) }));
+  return agents.map((agent) => ({ Id: agent.Id, name: displayName(agent), role: agent.role }));
 };
 
 // agentId null/"" clears the assignment.
@@ -151,7 +157,9 @@ const assignToAgent = async (ids, agentId, actor) => {
 };
 
 const getAllFromDB = async (filters, options, user) => {
-  const { page, limit, skip } = paginationHelpers.calculatePagination(options);
+  const { page } = paginationHelpers.calculatePagination(options);
+  const limit = Math.min(Math.max(Math.floor(Number(options?.limit)) || 10, 1), MAX_PAGE_SIZE);
+  const skip = (page - 1) * limit;
   const { searchTerm, status, claimType } = filters || {};
   const reference = normalizeReferenceCode(filters?.reference);
   const phone = String(filters?.phone || "").trim();
@@ -266,5 +274,6 @@ const deleteIdFromDB = async (id) => {
 };
 
 module.exports = {
+  isCustomer,
   checkPhone, trackByPhone, submit, getAllFromDB, updateOneFromDB, deleteIdFromDB, getAgents, assignToAgent,
 };
