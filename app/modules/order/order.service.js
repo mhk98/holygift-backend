@@ -586,12 +586,25 @@ const getPathaoConfig = async () => {
   };
 };
 
+// fetch() rejects with an AbortError when our 15s timer fires; report it as a
+// courier timeout instead of letting it surface as "Internal server error".
+const courierFetch = async (provider, url, options) => {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new ApiError(504, `${provider} did not respond within 15 seconds (${new URL(url).origin}). Check the ${provider} API URL in Courier API settings.`);
+    }
+    throw new ApiError(502, `Could not reach ${provider}: ${error?.cause?.code || error.message}`);
+  }
+};
+
 const steadfastRequest = async (path, { method = "GET", body } = {}) => {
   const config = await getSteadfastConfig();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${config.baseUrl}${path}`, {
+    const response = await courierFetch("Steadfast", `${config.baseUrl}${path}`, {
       method,
       signal: controller.signal,
       headers: {
@@ -618,11 +631,11 @@ const steadfastRequest = async (path, { method = "GET", body } = {}) => {
   }
 };
 
-const pathaoToken = async (config) => {
+const issuePathaoToken = async (config) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${config.baseUrl}/aladdin/api/v1/issue-token`, {
+    const response = await courierFetch("Pathao", `${config.baseUrl}/aladdin/api/v1/issue-token`, {
       method: "POST",
       signal: controller.signal,
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -646,19 +659,59 @@ const pathaoToken = async (config) => {
     }
     const token = data?.access_token || data?.data?.access_token || data?.token;
     if (!token) throw new ApiError(400, "Pathao access token missing from response");
-    return token;
+    const expiresIn = Number(data?.expires_in || data?.data?.expires_in) || 3600;
+    return { token, expiresAt: Date.now() + expiresIn * 1000 };
   } finally {
     clearTimeout(timer);
   }
 };
 
-const pathaoRequest = async (path, { method = "GET", body, config, token } = {}) => {
-  const resolvedConfig = config || await getPathaoConfig();
-  const accessToken = token || await pathaoToken(resolvedConfig);
+// Issuing a token per request doubles the calls and trips Pathao's rate limit,
+// so reuse it until shortly before it expires. Concurrent callers share one issue.
+const pathaoTokenCache = new Map();
+const pathaoTokenKey = (config) => [config.baseUrl, config.clientId, config.username].join("|");
+
+const pathaoToken = async (config) => {
+  const key = pathaoTokenKey(config);
+  const cached = pathaoTokenCache.get(key);
+  if (cached && (cached.pending || cached.expiresAt - 60000 > Date.now())) {
+    return cached.pending || cached.token;
+  }
+  const pending = issuePathaoToken(config).then((issued) => {
+    pathaoTokenCache.set(key, issued);
+    return issued.token;
+  }, (error) => {
+    pathaoTokenCache.delete(key);
+    throw error;
+  });
+  pathaoTokenCache.set(key, { pending });
+  return pending;
+};
+
+const clearPathaoToken = (config, token) => {
+  const key = pathaoTokenKey(config);
+  if (pathaoTokenCache.get(key)?.token === token) pathaoTokenCache.delete(key);
+};
+
+const pathaoRequest = async (path, options = {}) => {
+  const config = options.config || await getPathaoConfig();
+  const token = options.token || await pathaoToken(config);
+  try {
+    return await sendPathaoRequest(path, { ...options, config, token });
+  } catch (error) {
+    // A cached token can be revoked before it expires; issue a fresh one once.
+    if (error?.statusCode !== 401) throw error;
+    clearPathaoToken(config, token);
+    if (options.token) throw error;
+    return sendPathaoRequest(path, { ...options, config, token: await pathaoToken(config) });
+  }
+};
+
+const sendPathaoRequest = async (path, { method = "GET", body, config: resolvedConfig, token: accessToken }) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${resolvedConfig.baseUrl}${path}`, {
+    const response = await courierFetch("Pathao", `${resolvedConfig.baseUrl}${path}`, {
       method,
       signal: controller.signal,
       headers: {
@@ -690,6 +743,8 @@ const pathaoRequestFirst = async (paths, options = {}) => {
     try {
       return await pathaoRequest(path, options);
     } catch (error) {
+      // The fallback path would only be rate limited too.
+      if (error?.statusCode === 429) throw error;
       lastError = error;
     }
   }

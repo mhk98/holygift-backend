@@ -379,8 +379,12 @@ const startServer = async () => {
 
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
-      courierSyncWorker.start();
-      scratchCardCourierSyncWorker.start();
+      // Every backend sharing the live DB polls the same courier accounts, so
+      // local copies can opt out with COURIER_SYNC_ENABLED=false.
+      if (process.env.COURIER_SYNC_ENABLED !== "false") {
+        courierSyncWorker.start();
+        scratchCardCourierSyncWorker.start();
+      }
     });
   } catch (error) {
     console.error("❌ Failed to connect to database:", error.message);

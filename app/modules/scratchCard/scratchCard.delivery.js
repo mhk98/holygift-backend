@@ -1,8 +1,7 @@
-const { getWebsiteDeliveryCharge } = require("../order/orderPricing");
-
 // The customer pays the delivery charge for a prize, so the courier collects it
-// as COD. The amounts are the website's own inside/outside Dhaka charges.
+// as COD. Prize delivery has its own fixed charges, separate from the website's.
 const DELIVERY_AREAS = ["inside", "outside"];
+const DELIVERY_CHARGES = { inside: 100, outside: 150 };
 
 // The claim form has a free-text address and no district. Dhaka anywhere in it
 // counts as inside Dhaka, as the storefront treats Dhaka district; an admin can
@@ -13,13 +12,8 @@ const detectArea = (address) => (DHAKA_PATTERN.test(String(address || "")) ? "in
 const effectiveArea = (card) =>
   DELIVERY_AREAS.includes(card.deliveryArea) ? card.deliveryArea : detectArea(card.address);
 
-const getDeliveryCharges = async () => {
-  const [inside, outside] = await Promise.all([
-    getWebsiteDeliveryCharge("dhaka"),
-    getWebsiteDeliveryCharge("outside"),
-  ]);
-  return { inside, outside };
-};
+// Async so callers don't change if the charges move to settings later.
+const getDeliveryCharges = async () => ({ ...DELIVERY_CHARGES });
 
 const chargeFor = (card, charges) => charges[effectiveArea(card)];
 

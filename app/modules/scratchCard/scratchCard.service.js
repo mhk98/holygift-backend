@@ -8,6 +8,7 @@ const {
 } = require("./scratchCard.constants");
 const { generateReferenceCode, normalizeReferenceCode } = require("./scratchCard.reference");
 const { DELIVERY_AREAS, effectiveArea, getDeliveryCharges, chargeFor } = require("./scratchCard.delivery");
+const { courierStage } = require("./scratchCard.courier");
 const ScratchCard = () => db.scratchCard;
 
 const PHONE_PATTERN = /^01\d{9}$/;
@@ -110,9 +111,10 @@ const dayRange = (column, from, to) => {
   return from || to ? { [column]: range } : null;
 };
 
-// Every staff role except admin/superAdmin can be assigned claims and works as
-// an agent. "user" is the storefront customer role, never an agent.
-const NON_AGENT_ROLES = ["superadmin", "admin", "user"];
+// Every staff role except admin/superAdmin/leader can be assigned claims and
+// works as an agent. Leaders see every claim like an admin but cannot assign.
+// "user" is the storefront customer role, never an agent.
+const NON_AGENT_ROLES = ["superadmin", "admin", "leader", "user"];
 const normalizedRole = (user) => String(user?.role || "").trim().toLowerCase();
 const isAgent = (user) => !NON_AGENT_ROLES.includes(normalizedRole(user));
 const isCustomer = (user) => normalizedRole(user) === "user";
@@ -156,6 +158,29 @@ const assignToAgent = async (ids, agentId, actor) => {
   return { updated, ...assignment };
 };
 
+// The courier status filter: "none" = not sent yet, "courier:<name>" = sent to
+// that courier, "stage:<stage>" = see courierStage, "status:<status>" = one exact status.
+const courierStatusCondition = async (value) => {
+  const [kind, ...rest] = String(value || "").split(":");
+  const arg = rest.join(":");
+  if (kind === "none") return { courier: null };
+  if (kind === "courier" && arg) return { courier: arg };
+  if (kind === "status" && arg) return { courier: { [Op.ne]: null }, status: arg };
+  if (kind === "stage" && arg) {
+    // Couriers report many raw statuses, so match the ones in use that fall in this stage.
+    const pairs = await ScratchCard().findAll({
+      attributes: ["courier", "courierStatus"],
+      where: { courier: { [Op.ne]: null } },
+      group: ["courier", "courierStatus"],
+      raw: true,
+    });
+    const matches = pairs.filter((p) => courierStage(p.courier, p.courierStatus) === arg);
+    if (!matches.length) return { Id: null };
+    return { [Op.or]: matches.map((p) => ({ courier: p.courier, courierStatus: p.courierStatus })) };
+  }
+  throw new ApiError(400, "Invalid courier status filter");
+};
+
 const getAllFromDB = async (filters, options, user) => {
   const { page } = paginationHelpers.calculatePagination(options);
   const limit = Math.min(Math.max(Math.floor(Number(options?.limit)) || 10, 1), MAX_PAGE_SIZE);
@@ -163,6 +188,7 @@ const getAllFromDB = async (filters, options, user) => {
   const { searchTerm, status, claimType } = filters || {};
   const reference = normalizeReferenceCode(filters?.reference);
   const phone = String(filters?.phone || "").trim();
+  const prize = String(filters?.prize || "").trim();
   const andConditions = [];
   // An agent only ever sees the cards assigned to them.
   if (isAgent(user)) {
@@ -186,7 +212,11 @@ const getAllFromDB = async (filters, options, user) => {
       ],
     });
   }
-  if (status) andConditions.push({ status });
+  // Status is the manual one, so it only covers cards not yet sent to a courier.
+  if (status) andConditions.push({ status, courier: null });
+  if (filters?.courierStatus) andConditions.push(await courierStatusCondition(filters.courierStatus));
+  // Claims made before the wall watch was renamed still say "Big Size Wall Watch".
+  if (prize) andConditions.push({ prize: prize === "Luxury Wall Watch" ? [prize, "Big Size Wall Watch"] : prize });
   if (claimType && !reference && !phone) {
     if (!SCRATCH_CARD_CLAIM_TYPES.includes(claimType)) throw new ApiError(400, "Invalid claim type");
     andConditions.push({ claimType });
@@ -196,17 +226,21 @@ const getAllFromDB = async (filters, options, user) => {
   const approved = dayRange("approvedAt", filters?.approvedFrom, filters?.approvedTo);
   if (approved) andConditions.push(approved);
   const where = andConditions.length ? { [Op.and]: andConditions } : {};
-  const [data, count, statusRows, deliveryCharges] = await Promise.all([
+  const [data, count, statusRows, courierStatusRows, deliveryCharges] = await Promise.all([
     ScratchCard().findAll({ where, offset: skip, limit, order: [["createdAt", "DESC"]] }),
     ScratchCard().count({ where }),
-    // Courier statuses vary, so the status filter offers whatever is in use.
-    ScratchCard().findAll({ attributes: ["status"], group: ["status"], raw: true }),
+    ScratchCard().findAll({ attributes: ["status"], where: { courier: null }, group: ["status"], raw: true }),
+    // Courier statuses vary, so the courier status filter offers whatever is in use.
+    ScratchCard().findAll({ attributes: ["status"], where: { courier: { [Op.ne]: null } }, group: ["status"], raw: true }),
     getDeliveryCharges(),
   ]);
   const statuses = [...new Set([...SCRATCH_CARD_STATUSES, ...statusRows.map((r) => r.status).filter(Boolean)])];
   const rows = claimType === "repeat" ? await attachPreviousClaims(data) : data;
   return {
-    meta: { count, page, limit, statuses, deliveryCharges },
+    meta: {
+      count, page, limit, statuses, deliveryCharges,
+      courierStatuses: courierStatusRows.map((r) => r.status).filter(Boolean).sort(),
+    },
     // The delivery charge the courier will collect; a sent card shows what was actually sent.
     data: rows.map((row) => {
       const plain = typeof row.get === "function" ? row.get({ plain: true }) : row;
@@ -247,7 +281,7 @@ const updateOneFromDB = async (id, payload, user) => {
     if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
     changes.deliveryArea = payload.deliveryArea;
   }
-  // Moving back to Pending or Rejected withdraws the approval.
+  // Moving away from Approved withdraws the approval.
   if (status === "Approved") {
     if (!row.approvedAt) changes.approvedAt = new Date();
   } else if (status !== undefined) {

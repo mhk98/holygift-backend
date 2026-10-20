@@ -20,7 +20,7 @@ const submit = catchAsync(async (req, res) => {
 });
 
 const getAllFromDB = catchAsync(async (req, res) => {
-  const filters = pick(req.query, ["searchTerm", "status", "claimType", "reference", "phone", "submittedFrom", "submittedTo", "approvedFrom", "approvedTo", "assignedAgentId"]);
+  const filters = pick(req.query, ["searchTerm", "status", "claimType", "reference", "phone", "submittedFrom", "submittedTo", "approvedFrom", "approvedTo", "assignedAgentId", "prize", "courierStatus"]);
   const options = pick(req.query, ["limit", "page", "sortBy", "sortOrder"]);
   const result = await Service.getAllFromDB(filters, options, req.user);
   sendResponse(res, { statusCode: 200, success: true, message: "Scratch cards fetched", meta: result.meta, data: result.data });

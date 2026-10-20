@@ -240,24 +240,11 @@ const getEffectiveMenuPermissions = async (role) => {
     where: { role: normalizedRole },
   });
 
-  // Every staff role except admin/superAdmin works assigned scratch card
-  // claims as an agent, so it always gets that menu; the scratch card API
-  // limits them to their own claims. "user" is the storefront customer.
-  const isAgentRole = ![ENUM_USER_ROLE.SUPER_ADMIN, ENUM_USER_ROLE.ADMIN, ENUM_USER_ROLE.USER]
-    .map(normalizeRoleKey)
-    .includes(normalizeRoleKey(normalizedRole));
-  const withAgentMenu = (permissions) =>
-    isAgentRole ? uniq([...permissions, "scratch_card"]) : permissions;
-
-  if (!record) {
-    // Fallback to configured defaults when no explicit role-permission record exists.
-    // This keeps the UI navigable out of the box and prevents empty permission sets.
-    return withAgentMenu(validateMenuPermissions(getDefaultPermissionsForRole(normalizedRole)));
-  }
-
-  const effectivePermissions = withAgentMenu(validateMenuPermissions(
-    includeNewSettingsChildren(normalizedRole, record.menuPermissions || []),
-  ));
+  // Fallback to configured defaults when no explicit role-permission record exists.
+  // This keeps the UI navigable out of the box and prevents empty permission sets.
+  const effectivePermissions = record
+    ? validateMenuPermissions(includeNewSettingsChildren(normalizedRole, record.menuPermissions || []))
+    : validateMenuPermissions(getDefaultPermissionsForRole(normalizedRole));
 
   // Super admin always receives every dashboard capability, including newly
   // introduced menu permissions that may not exist in an older DB record.

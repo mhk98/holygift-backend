@@ -15,11 +15,13 @@ const ADMINS = [ENUM_USER_ROLE.SUPER_ADMIN, ENUM_USER_ROLE.ADMIN];
 const staffOnly = (req, res, next) =>
   isCustomer(req.user) ? next(new ApiError(403, "Forbidden")) : next();
 const ADMINS_AND_AGENTS = [auth(), staffOnly];
+// Leaders see and work every claim like an admin, but cannot assign or delete.
+const ADMINS_AND_LEADERS = [...ADMINS, ENUM_USER_ROLE.LEADER];
 
-router.get(   "/agents", auth(...ADMINS), Controller.getAgents);
+router.get(   "/agents", auth(...ADMINS_AND_LEADERS), Controller.getAgents);
 router.post(  "/assign", auth(...ADMINS), Controller.assignToAgent);
-router.post(  "/courier/sync",      auth(...ADMINS), Controller.syncCourierStatus);
-router.post(  "/courier/:provider", auth(...ADMINS), Controller.sendToCourier);
+router.post(  "/courier/sync",      auth(...ADMINS_AND_LEADERS), Controller.syncCourierStatus);
+router.post(  "/courier/:provider", auth(...ADMINS_AND_LEADERS), Controller.sendToCourier);
 router.get(   "/",       ...ADMINS_AND_AGENTS, Controller.getAllFromDB);
 router.put(   "/:id",    ...ADMINS_AND_AGENTS, Controller.updateOneFromDB);
 router.delete("/:id",    auth(ENUM_USER_ROLE.SUPER_ADMIN, ENUM_USER_ROLE.ADMIN), Controller.deleteIdFromDB);

@@ -16,14 +16,28 @@ const humanizeCourierStatus = (value) =>
     .toLowerCase()
     .replace(/\b\w/g, (c) => c.toUpperCase()) || "In Courier";
 
+// Groups a courier's own status into a stage the admin can filter on:
+// in_courier, on_hold, delivered, returned or cancelled.
+const courierStage = (provider, rawStatus) => {
+  const map = provider === "Pathao" ? courier.mapPathaoStatusToOrderStatus : courier.mapSteadfastStatusToOrderStatus;
+  return map(rawStatus) || "in_courier";
+};
+
 // Delivered, cancelled and returned parcels no longer change, so the sync stops checking them.
 const isFinal = (mappedOrderStatus) => ["delivered", "cancelled", "returned"].includes(mappedOrderStatus);
+
+// A courier's "Pending" (booked, not picked up yet) would read like our own
+// pre-approval Pending, so it is shown as "In Courier" instead.
+const displayCourierStatus = (rawStatus) => {
+  const status = humanizeCourierStatus(rawStatus);
+  return status === "Pending" ? "In Courier" : status;
+};
 
 const courierFields = (provider, rawStatus, mappedOrderStatus, extra = {}) => ({
   courier: provider,
   courierStatus: String(rawStatus || "").slice(0, 64) || null,
   courierFinal: isFinal(mappedOrderStatus),
-  status: humanizeCourierStatus(rawStatus).slice(0, 32),
+  status: displayCourierStatus(rawStatus).slice(0, 32),
   ...extra,
 });
 
@@ -207,4 +221,4 @@ const syncSelected = async (ids) => {
   return { synced, failed, notWithCourier: cardIds.length - cards.length };
 };
 
-module.exports = { sendToCourier, syncSelected, syncSteadfastStatusInDB, syncPathaoStatusInDB };
+module.exports = { courierStage, sendToCourier, syncSelected, syncSteadfastStatusInDB, syncPathaoStatusInDB };

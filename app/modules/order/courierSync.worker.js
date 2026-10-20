@@ -8,6 +8,9 @@ const createCourierSyncWorker = ({
   service,
   logger = console,
   intervalMs = 300000,
+  // Courier APIs rate limit per account, so space the lookups out.
+  delayMs = 400,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   pendingWhere = { status: { [Op.in]: ["in_courier", "on_hold"] } },
 }) => {
   let timer;
@@ -36,8 +39,14 @@ const createCourierSyncWorker = ({
             ? service.syncSteadfastStatusInDB : service.syncPathaoStatusInDB;
           await sync(order.Id, { automatic: true });
         } catch (error) {
+          // Once rate limited every following lookup fails too; retry next interval.
+          if (error?.statusCode === 429) {
+            logger.warn(`Courier sync paused at order ${order.Id}: rate limited, retrying next run`);
+            return;
+          }
           logger.warn(`Courier sync failed for order ${order.Id}: ${error.message}`);
         }
+        if (delayMs > 0) await wait(delayMs);
       }
     }
   };
