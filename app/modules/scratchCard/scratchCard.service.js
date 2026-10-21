@@ -247,7 +247,7 @@ const getAllFromDB = async (filters, options, user) => {
       return {
         ...plain,
         deliveryArea: effectiveArea(plain),
-        deliveryCharge: plain.courier && plain.codAmount != null ? Number(plain.codAmount) : chargeFor(plain, deliveryCharges),
+        deliveryCharge: chargeFor(plain, deliveryCharges),
       };
     }),
   };
@@ -274,12 +274,34 @@ const updateOneFromDB = async (id, payload, user) => {
     if (prize.length > 64) throw new ApiError(400, "Prize name is too long");
     changes.prize = prize;
   }
-  // Inside/outside Dhaka decides the delivery charge collected by the courier.
+  // The courier delivers to this address, so it is fixed once the card is sent.
+  if (payload?.address !== undefined) {
+    if (isAgent(user)) throw new ApiError(403, "Agents cannot change the address");
+    if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
+    const address = String(payload.address).trim();
+    if (!address) throw new ApiError(400, "Address is required");
+    changes.address = address;
+  }
+  // Inside/outside Dhaka decides the delivery charge collected by the courier;
+  // picking an area drops any custom charge so the area's charge applies.
   if (payload?.deliveryArea !== undefined) {
     if (isAgent(user)) throw new ApiError(403, "Agents cannot change the delivery area");
     if (!DELIVERY_AREAS.includes(payload.deliveryArea)) throw new ApiError(400, "Invalid delivery area");
     if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
     changes.deliveryArea = payload.deliveryArea;
+    changes.codAmount = null;
+  }
+  // A custom delivery charge for this card; null goes back to the area's charge.
+  if (payload?.deliveryCharge !== undefined) {
+    if (isAgent(user)) throw new ApiError(403, "Agents cannot change the delivery charge");
+    if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
+    if (payload.deliveryCharge === null || payload.deliveryCharge === "") {
+      changes.codAmount = null;
+    } else {
+      const amount = Number(payload.deliveryCharge);
+      if (!Number.isFinite(amount) || amount < 0 || amount > 100000) throw new ApiError(400, "Invalid delivery charge");
+      changes.codAmount = Math.round(amount * 100) / 100;
+    }
   }
   // Moving away from Approved withdraws the approval.
   if (status === "Approved") {
@@ -289,14 +311,11 @@ const updateOneFromDB = async (id, payload, user) => {
   }
   await row.update(changes);
   const plain = row.get({ plain: true });
-  const area = effectiveArea(plain);
   // The list shows these two derived fields; keep the row the admin page merges in complete.
   return {
     ...plain,
-    deliveryArea: area,
-    deliveryCharge: plain.courier && plain.codAmount != null
-      ? Number(plain.codAmount)
-      : (await getDeliveryCharges())[area],
+    deliveryArea: effectiveArea(plain),
+    deliveryCharge: chargeFor(plain, await getDeliveryCharges()),
   };
 };
 

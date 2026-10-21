@@ -15,6 +15,9 @@ const effectiveArea = (card) =>
 // Async so callers don't change if the charges move to settings later.
 const getDeliveryCharges = async () => ({ ...DELIVERY_CHARGES });
 
-const chargeFor = (card, charges) => charges[effectiveArea(card)];
+// codAmount set before sending is an admin's own charge for this card; once
+// sent it is the amount the courier was told to collect.
+const chargeFor = (card, charges) =>
+  card.codAmount != null ? Number(card.codAmount) : charges[effectiveArea(card)];
 
 module.exports = { DELIVERY_AREAS, effectiveArea, getDeliveryCharges, chargeFor };
