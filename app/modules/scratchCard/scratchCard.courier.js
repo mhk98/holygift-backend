@@ -3,6 +3,7 @@ const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
 const { courierClient: courier } = require("../order/order.service");
 const { getDeliveryCharges, chargeFor } = require("./scratchCard.delivery");
+const { withCrossProductPrices, collectionTotal } = require("./scratchCard.pricing");
 
 const ScratchCard = () => db.scratchCard;
 
@@ -41,7 +42,7 @@ const courierFields = (provider, rawStatus, mappedOrderStatus, extra = {}) => ({
   ...extra,
 });
 
-// The prize is free; the customer pays only the delivery charge, collected as COD.
+// The prize is free; COD includes cross products plus delivery.
 const steadfastPayload = (card, codAmount) => courier.compactObject({
   invoice: card.referenceCode,
   recipient_name: String(card.fullName).slice(0, 100),
@@ -49,7 +50,7 @@ const steadfastPayload = (card, codAmount) => courier.compactObject({
   recipient_address: String(card.address).replace(/\s+/g, " ").trim().slice(0, 250),
   cod_amount: codAmount,
   item_description: `Scratch card prize: ${card.prize}`.slice(0, 250),
-  note: `Scratch card ${card.referenceCode}. Collect delivery charge only (${codAmount} Tk)`,
+  note: `Scratch card ${card.referenceCode}. Collect total COD (${codAmount} Tk)`,
 });
 
 const pathaoPayload = (card, config, codAmount) => courier.compactObject({
@@ -66,7 +67,7 @@ const pathaoPayload = (card, config, codAmount) => courier.compactObject({
   item_quantity: 1,
   item_weight: config.itemWeight,
   item_description: `Scratch card prize: ${card.prize}`.slice(0, 250),
-  special_instruction: `Collect delivery charge only (${codAmount} Tk)`,
+  special_instruction: `Collect total COD (${codAmount} Tk)`,
   amount_to_collect: codAmount,
 });
 
@@ -90,7 +91,18 @@ const loadSendable = async (ids, provider) => {
       skipped.push({ reference: ref, message: "Pathao needs an address of at least 10 characters" });
     } else ready.push(card);
   }
-  return { ready, skipped };
+  const priced = await withCrossProductPrices(ready);
+  const charges = await getDeliveryCharges();
+  const sendable = ready.filter((card, index) => {
+    const total = collectionTotal(priced[index], chargeFor(card, charges));
+    if (total === null) {
+      skipped.push({ reference: card.referenceCode, message: "Cross product price is missing or varies by variant; set one exact selling price before sending" });
+      return false;
+    }
+    card.setDataValue("courierCodAmount", total);
+    return true;
+  });
+  return { ready: sendable, skipped };
 };
 
 const sendToSteadfast = async (ids) => {
@@ -98,7 +110,7 @@ const sendToSteadfast = async (ids) => {
   if (!ready.length) return { sent: [], skipped };
 
   const charges = await getDeliveryCharges();
-  const codAmounts = ready.map((card) => chargeFor(card, charges));
+  const codAmounts = ready.map((card) => Number(card.courierCodAmount));
   const payloads = ready.map((card, index) => steadfastPayload(card, codAmounts[index]));
   const response = await courier.steadfastRequest("/create_order/bulk-order", {
     method: "POST",
@@ -118,7 +130,8 @@ const sendToSteadfast = async (ids) => {
       consignmentId: row.consignment_id ? String(row.consignment_id) : null,
       trackingCode: row.tracking_code || null,
       courierSentAt: new Date(),
-      codAmount: codAmounts[index],
+      codAmount: chargeFor(card, charges),
+      courierCodAmount: codAmounts[index],
     }));
     sent.push({ reference: card.referenceCode, trackingCode: row.tracking_code || null });
   }));
@@ -135,7 +148,7 @@ const sendToPathao = async (ids) => {
   const sent = [];
   for (const card of ready) {
     try {
-      const codAmount = chargeFor(card, charges);
+      const codAmount = Number(card.courierCodAmount);
       const response = await courier.pathaoRequest("/aladdin/api/v1/orders", {
         method: "POST", body: pathaoPayload(card, config, codAmount), config, token,
       });
@@ -146,7 +159,8 @@ const sendToPathao = async (ids) => {
         consignmentId: consignmentId ? String(consignmentId) : null,
         trackingCode: consignmentId ? String(consignmentId) : null,
         courierSentAt: new Date(),
-        codAmount,
+        codAmount: chargeFor(card, charges),
+        courierCodAmount: codAmount,
       }));
       sent.push({ reference: card.referenceCode, trackingCode: consignmentId });
     } catch (error) {

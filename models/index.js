@@ -696,6 +696,8 @@ const ensureScratchCardColumns = async () => {
     );
   }
   const assignmentColumns = {
+    crossProducts: DataTypes.JSON,
+    courierCodAmount: DataTypes.DECIMAL(10, 2),
     assignedAgentId: DataTypes.INTEGER(10),
     assignedAgentName: DataTypes.STRING(191),
     assignedById: DataTypes.INTEGER(10),

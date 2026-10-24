@@ -13,6 +13,7 @@ module.exports = (sequelize, DataTypes) => {
       status:   { type: DataTypes.STRING(32),  allowNull: false, defaultValue: "Pending" },
       claimType:{ type: DataTypes.STRING(16),  allowNull: false, defaultValue: "first" },
       note:     { type: DataTypes.TEXT,        allowNull: true },
+      crossProducts: { type: DataTypes.JSON, allowNull: true },
       // Set when the claim is approved; the admin panel filters by it.
       approvedAt:{ type: DataTypes.DATE,       allowNull: true },
       // Agent (user with the "Agent" role) who handles this claim; they see only their own.
@@ -29,8 +30,9 @@ module.exports = (sequelize, DataTypes) => {
       courierSentAt:  { type: DataTypes.DATE,       allowNull: true },
       // "inside"/"outside" Dhaka set by an admin; null = guessed from the address.
       deliveryArea:   { type: DataTypes.STRING(16), allowNull: true },
-      // Delivery charge the courier collects from the customer, fixed when sent.
+      // Delivery charge fixed when sent; courierCodAmount includes cross products.
       codAmount:      { type: DataTypes.DECIMAL(10, 2), allowNull: true },
+      courierCodAmount: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
       deletedAt:{ type: DataTypes.DATE,        allowNull: true },
     },
     // The unique index on referenceCode is added by ensureScratchCardColumns

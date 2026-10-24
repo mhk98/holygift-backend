@@ -31,6 +31,7 @@ const courierSyncWorker = createCourierSyncWorker({
 });
 // Scratch card prizes sent to the courier, until they are delivered/cancelled/returned.
 const scratchCardCourierSyncWorker = createCourierSyncWorker({
+  entityLabel: "scratch card",
   Order: db.scratchCard,
   service: require("./app/modules/scratchCard/scratchCard.courier"),
   pendingWhere: { courierFinal: false },
@@ -96,7 +97,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:5173",
-  "https://admin.holygift.online",
+  "https://admin.holygift.xyz",
   "https://holygift.xyz",
 ];
 

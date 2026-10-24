@@ -588,15 +588,24 @@ const getPathaoConfig = async () => {
 
 // fetch() rejects with an AbortError when our 15s timer fires; report it as a
 // courier timeout instead of letting it surface as "Internal server error".
+const courierCooldown = require("./courierCooldown").createCourierCooldown();
 const courierFetch = async (provider, url, options) => {
+  courierCooldown.check(provider);
+  let response;
   try {
-    return await fetch(url, options);
+    response = await fetch(url, options);
   } catch (error) {
     if (error?.name === "AbortError") {
       throw new ApiError(504, `${provider} did not respond within 15 seconds (${new URL(url).origin}). Check the ${provider} API URL in Courier API settings.`);
     }
     throw new ApiError(502, `Could not reach ${provider}: ${error?.cause?.code || error.message}`);
   }
+  if (response.status === 429) {
+    const error = courierCooldown.limited(provider, response.headers?.get?.("retry-after"));
+    await response.body?.cancel?.().catch(() => {});
+    throw error;
+  }
+  return response;
 };
 
 const steadfastRequest = async (path, { method = "GET", body } = {}) => {
@@ -622,9 +631,11 @@ const steadfastRequest = async (path, { method = "GET", body } = {}) => {
     } catch {
       data = text;
     }
+    if (Number(data?.status) === 429) throw courierCooldown.limited("Steadfast", response.headers?.get?.("retry-after"));
     if (!response.ok || (data?.status && Number(data.status) >= 400)) {
-      throw new ApiError(response.status || 400, data?.message || "Steadfast request failed");
+      throw new ApiError(response.ok ? Number(data.status) : response.status || 400, data?.message || "Steadfast request failed");
     }
+    courierCooldown.succeeded("Steadfast");
     return data;
   } finally {
     clearTimeout(timer);
@@ -731,6 +742,7 @@ const sendPathaoRequest = async (path, { method = "GET", body, config: resolvedC
     if (!response.ok || data?.type === "error") {
       throw new ApiError(response.status || 400, data?.message || "Pathao request failed");
     }
+    courierCooldown.succeeded("Pathao");
     return data;
   } finally {
     clearTimeout(timer);

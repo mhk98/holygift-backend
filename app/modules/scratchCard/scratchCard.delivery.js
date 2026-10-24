@@ -15,8 +15,8 @@ const effectiveArea = (card) =>
 // Async so callers don't change if the charges move to settings later.
 const getDeliveryCharges = async () => ({ ...DELIVERY_CHARGES });
 
-// codAmount set before sending is an admin's own charge for this card; once
-// sent it is the amount the courier was told to collect.
+// codAmount stores the delivery charge (including legacy sent cards).
+// courierCodAmount separately stores the total sent to the courier.
 const chargeFor = (card, charges) =>
   card.codAmount != null ? Number(card.codAmount) : charges[effectiveArea(card)];
 

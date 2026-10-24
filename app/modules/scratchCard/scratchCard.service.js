@@ -10,6 +10,8 @@ const { generateReferenceCode, normalizeReferenceCode } = require("./scratchCard
 const { DELIVERY_AREAS, effectiveArea, getDeliveryCharges, chargeFor } = require("./scratchCard.delivery");
 const { courierStage } = require("./scratchCard.courier");
 const ScratchCard = () => db.scratchCard;
+const { normalizeCrossProducts } = require("./scratchCard.crossProducts");
+const { withCrossProductPrices } = require("./scratchCard.pricing");
 
 const PHONE_PATTERN = /^01\d{9}$/;
 // The admin list lets staff pick up to this many rows per page (the shared
@@ -47,6 +49,8 @@ const submit = async (data, file) => {
     throw new ApiError(400, "Full name, phone, address and prize are required");
   }
   if (!PHONE_PATTERN.test(phone)) throw new ApiError(400, "Invalid phone number");
+  // Pathao rejects shorter delivery addresses.
+  if (address.length < 10) throw new ApiError(400, "পুরো ঠিকানা লিখুন (গ্রাম/এলাকা, থানা, জেলা) — কমপক্ষে ১০ অক্ষর");
   if (prize.length > 64) throw new ApiError(400, "Prize name is too long");
   if (!file) throw new ApiError(400, "Scratch card image is required");
 
@@ -165,7 +169,10 @@ const courierStatusCondition = async (value) => {
   const arg = rest.join(":");
   if (kind === "none") return { courier: null };
   if (kind === "courier" && arg) return { courier: arg };
-  if (kind === "status" && arg) return { courier: { [Op.ne]: null }, status: arg };
+  if (kind === "status" && arg) return {
+    courier: { [Op.ne]: null },
+    [Op.or]: [{ status: arg }, { courierStatus: arg }],
+  };
   if (kind === "stage" && arg) {
     // Couriers report many raw statuses, so match the ones in use that fall in this stage.
     const pairs = await ScratchCard().findAll({
@@ -190,6 +197,16 @@ const getAllFromDB = async (filters, options, user) => {
   const phone = String(filters?.phone || "").trim();
   const prize = String(filters?.prize || "").trim();
   const andConditions = [];
+  if (filters?.crossProductId !== undefined && filters.crossProductId !== "") {
+    const id = Number(filters.crossProductId);
+    if (!/^\d+$/.test(String(filters.crossProductId)) || !Number.isSafeInteger(id) || id <= 0) {
+      throw new ApiError(400, "Invalid cross product filter");
+    }
+    andConditions.push(db.sequelize.where(
+      db.sequelize.fn("JSON_CONTAINS", db.sequelize.col("crossProducts"), JSON.stringify({ Id: id })),
+      1,
+    ));
+  }
   // An agent only ever sees the cards assigned to them.
   if (isAgent(user)) {
     andConditions.push({ assignedAgentId: user.Id });
@@ -214,7 +231,19 @@ const getAllFromDB = async (filters, options, user) => {
   }
   // Status is the manual one, so it only covers cards not yet sent to a courier.
   if (status) andConditions.push({ status, courier: null });
-  if (filters?.courierStatus) andConditions.push(await courierStatusCondition(filters.courierStatus));
+  if (filters?.courierStatus) {
+    let selected = filters.courierStatus;
+    if (typeof selected === "string" && selected.trim().startsWith("[")) {
+      try { selected = JSON.parse(selected); } catch { throw new ApiError(400, "Invalid courier status filter"); }
+    }
+    if (!Array.isArray(selected)) selected = [selected];
+    if (selected.length > 100 || selected.some((value) => typeof value !== "string" || !value.trim())) {
+      throw new ApiError(400, "Invalid courier status filter");
+    }
+    if (selected.length) andConditions.push({
+      [Op.or]: await Promise.all([...new Set(selected)].map(courierStatusCondition)),
+    });
+  }
   // Claims made before the wall watch was renamed still say "Big Size Wall Watch".
   if (prize) andConditions.push({ prize: prize === "Luxury Wall Watch" ? [prize, "Big Size Wall Watch"] : prize });
   if (claimType && !reference && !phone) {
@@ -231,7 +260,7 @@ const getAllFromDB = async (filters, options, user) => {
     ScratchCard().count({ where }),
     ScratchCard().findAll({ attributes: ["status"], where: { courier: null }, group: ["status"], raw: true }),
     // Courier statuses vary, so the courier status filter offers whatever is in use.
-    ScratchCard().findAll({ attributes: ["status"], where: { courier: { [Op.ne]: null } }, group: ["status"], raw: true }),
+    ScratchCard().findAll({ attributes: ["status", "courierStatus"], where: { courier: { [Op.ne]: null } }, group: ["status", "courierStatus"], raw: true }),
     getDeliveryCharges(),
   ]);
   const statuses = [...new Set([...SCRATCH_CARD_STATUSES, ...statusRows.map((r) => r.status).filter(Boolean)])];
@@ -239,17 +268,19 @@ const getAllFromDB = async (filters, options, user) => {
   return {
     meta: {
       count, page, limit, statuses, deliveryCharges,
-      courierStatuses: courierStatusRows.map((r) => r.status).filter(Boolean).sort(),
+      courierStatuses: [...new Set(courierStatusRows.flatMap((r) => [r.status, r.courierStatus])
+        .filter((value) => typeof value === "string" && value.trim()))].sort(),
     },
     // The delivery charge the courier will collect; a sent card shows what was actually sent.
-    data: rows.map((row) => {
+    data: await withCrossProductPrices(rows.map((row) => {
       const plain = typeof row.get === "function" ? row.get({ plain: true }) : row;
       return {
         ...plain,
+        crossProducts: normalizeCrossProducts(plain.crossProducts),
         deliveryArea: effectiveArea(plain),
         deliveryCharge: chargeFor(plain, deliveryCharges),
       };
-    }),
+    })),
   };
 };
 
@@ -266,9 +297,23 @@ const updateOneFromDB = async (id, payload, user) => {
     throw new ApiError(400, `This card is with ${row.courier}; its status comes from the courier`);
   }
   const changes = { ...(status !== undefined && { status }), ...(note !== undefined && { note }) };
-  // Admins can correct the prize a customer typed; agents cannot.
+  if (payload?.crossProductIds !== undefined) {
+    const ids = payload.crossProductIds;
+    if (!Array.isArray(ids) || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new ApiError(400, "Cross products must be an array of valid product IDs");
+    }
+    const uniqueIds = [...new Set(ids)];
+    const products = uniqueIds.length ? await db.product.findAll({
+      where: { Id: { [Op.in]: uniqueIds } }, attributes: ["Id", "name"],
+    }) : [];
+    if (products.length !== uniqueIds.length) {
+      throw new ApiError(400, "One or more selected products no longer exist");
+    }
+    const byId = new Map(products.map((product) => [product.Id, product.name]));
+    changes.crossProducts = uniqueIds.map((Id) => ({ Id, name: byId.get(Id) }));
+  }
+  // Staff can correct claim details; agents are restricted to their assigned cards above.
   if (payload?.prize !== undefined) {
-    if (isAgent(user)) throw new ApiError(403, "Agents cannot change the prize");
     const prize = String(payload.prize).trim();
     if (!prize) throw new ApiError(400, "Prize is required");
     if (prize.length > 64) throw new ApiError(400, "Prize name is too long");
@@ -276,7 +321,6 @@ const updateOneFromDB = async (id, payload, user) => {
   }
   // The courier delivers to this address, so it is fixed once the card is sent.
   if (payload?.address !== undefined) {
-    if (isAgent(user)) throw new ApiError(403, "Agents cannot change the address");
     if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
     const address = String(payload.address).trim();
     if (!address) throw new ApiError(400, "Address is required");
@@ -285,7 +329,6 @@ const updateOneFromDB = async (id, payload, user) => {
   // Inside/outside Dhaka decides the delivery charge collected by the courier;
   // picking an area drops any custom charge so the area's charge applies.
   if (payload?.deliveryArea !== undefined) {
-    if (isAgent(user)) throw new ApiError(403, "Agents cannot change the delivery area");
     if (!DELIVERY_AREAS.includes(payload.deliveryArea)) throw new ApiError(400, "Invalid delivery area");
     if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
     changes.deliveryArea = payload.deliveryArea;
@@ -293,7 +336,6 @@ const updateOneFromDB = async (id, payload, user) => {
   }
   // A custom delivery charge for this card; null goes back to the area's charge.
   if (payload?.deliveryCharge !== undefined) {
-    if (isAgent(user)) throw new ApiError(403, "Agents cannot change the delivery charge");
     if (row.courier) throw new ApiError(400, `This card is already with ${row.courier}`);
     if (payload.deliveryCharge === null || payload.deliveryCharge === "") {
       changes.codAmount = null;
@@ -312,11 +354,12 @@ const updateOneFromDB = async (id, payload, user) => {
   await row.update(changes);
   const plain = row.get({ plain: true });
   // The list shows these two derived fields; keep the row the admin page merges in complete.
-  return {
+  return (await withCrossProductPrices([{
     ...plain,
+    crossProducts: normalizeCrossProducts(plain.crossProducts),
     deliveryArea: effectiveArea(plain),
     deliveryCharge: chargeFor(plain, await getDeliveryCharges()),
-  };
+  }]))[0];
 };
 
 const deleteIdFromDB = async (id) => {

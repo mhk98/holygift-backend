@@ -10,15 +10,19 @@ const createCourierSyncWorker = ({
   intervalMs = 300000,
   // Courier APIs rate limit per account, so space the lookups out.
   delayMs = 400,
+  now = Date.now,
+  entityLabel = "order",
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   pendingWhere = { status: { [Op.in]: ["in_courier", "on_hold"] } },
 }) => {
   let timer;
   let active;
   let stopped = false;
+  let cursor = 0;
+  let retryAt = 0;
+  let rateLimitCount = 0;
 
   const sweep = async () => {
-    let cursor = 0;
     while (!stopped) {
       const orders = await Order.findAll({
         attributes: ["Id", "courier"],
@@ -30,22 +34,27 @@ const createCourierSyncWorker = ({
         order: [["Id", "ASC"]],
         limit: 100,
       });
-      if (!orders.length) break;
+      if (!orders.length) { cursor = 0; break; }
       for (const order of orders) {
         if (stopped) break;
-        cursor = order.Id;
         try {
           const sync = String(order.courier).toLowerCase() === "steadfast"
             ? service.syncSteadfastStatusInDB : service.syncPathaoStatusInDB;
           await sync(order.Id, { automatic: true });
+          rateLimitCount = 0;
         } catch (error) {
-          // Once rate limited every following lookup fails too; retry next interval.
+          // Keep the cursor before this row, and resume it after the cooldown.
           if (error?.statusCode === 429) {
-            logger.warn(`Courier sync paused at order ${order.Id}: rate limited, retrying next run`);
+            rateLimitCount = Math.min(rateLimitCount + 1, 20);
+            const cooldownMs = Math.max(Number(error.retryAfterMs) || 0,
+              Math.min(intervalMs * 2 ** (rateLimitCount - 1), 3600000));
+            retryAt = now() + cooldownMs;
+            logger.warn(`Courier sync paused at ${entityLabel} ${order.Id} (${order.courier}): rate limited; retry no earlier than ${new Date(retryAt).toISOString()}`);
             return;
           }
-          logger.warn(`Courier sync failed for order ${order.Id}: ${error.message}`);
+          logger.warn(`Courier sync failed for ${entityLabel} ${order.Id}: ${error.message}`);
         }
+        cursor = order.Id;
         if (delayMs > 0) await wait(delayMs);
       }
     }
@@ -54,6 +63,7 @@ const createCourierSyncWorker = ({
   const run = () => {
     if (stopped) return Promise.resolve();
     if (active) return active;
+    if (now() < retryAt) return Promise.resolve();
     active = sweep().catch((error) => {
       logger.error(`Courier sync failed: ${error.message}`);
     }).finally(() => { active = null; });
