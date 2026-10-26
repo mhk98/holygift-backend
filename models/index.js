@@ -124,6 +124,10 @@ db.scratchCard = require("../app/modules/scratchCard/scratchCard.model")(
   db.sequelize,
   DataTypes,
 );
+db.scratchCardPrize = require("../app/modules/scratchCardPrize/scratchCardPrize.model")(
+  db.sequelize,
+  DataTypes,
+);
 db.siteSetting = require("../app/modules/siteSetting/siteSetting.model")(
   db.sequelize,
   DataTypes,
@@ -1084,6 +1088,7 @@ db.ready = db.sequelize
     await ensureOrderAssignmentColumns();
     await ensureLandingPageContentColumns();
     await ensureScratchCardColumns();
+    await require("../app/modules/scratchCardPrize/scratchCardPrize.service").seedDefaultPrizes();
     console.log("Connection re-synced successfully");
   })
   .catch((err) => {

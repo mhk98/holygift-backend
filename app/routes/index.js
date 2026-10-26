@@ -40,6 +40,7 @@ const ReportRoutes             = require("../modules/report/report.routes");
 const CacheRoutes              = require("../modules/cache/cache.routes");
 const IntegrationRoutes        = require("../modules/integration/integration.routes");
 const ScratchCardRoutes        = require("../modules/scratchCard/scratchCard.routes");
+const ScratchCardPrizeRoutes   = require("../modules/scratchCardPrize/scratchCardPrize.routes");
 
 const router = express.Router();
 
@@ -85,6 +86,7 @@ const moduleRoutes = [
   { path: "/reports",              route: ReportRoutes },
   { path: "/cache",                route: CacheRoutes },
   { path: "/integrations",         route: IntegrationRoutes },
+  { path: "/scratch-card-prizes",  route: ScratchCardPrizeRoutes },
   { path: "/scratch-cards",        route: ScratchCardRoutes },
 ];
 
