@@ -6,45 +6,31 @@ const OrderFraudCheckService = require("./orderFraudCheck.service");
 const TrackingService = require("../tracking/tracking.service");
 const { getClientIp } = require("../../utils/clientIp");
 
-// Retain the same ID on retries and in the browser for platform deduplication.
-async function deliverPurchase(payload, context) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const result = await TrackingService.trackEvent(payload, context);
-      if (result.results.every((item) => item.ok || item.skipped)) return;
-    } catch {
-      // Tracking failures must never turn a saved order into a failed checkout.
-    }
-    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-  }
-  console.warn("Purchase tracking delivery failed", payload.eventId);
-}
-
 const createOrder = catchAsync(async (req, res) => {
-  const result = await OrderService.createOrderInDB({
-    ...req.body,
-    ipAddress: getClientIp(req),
-  });
-  if (req.body.landingTracking?.enabled === true) {
-    const eventId = `Purchase.order.${result.Id || result.orderId}`;
-    result.purchaseEventId = eventId;
-    void deliverPurchase({
-      eventName: "Purchase",
-      eventId,
-      eventSourceUrl: req.body.landingTracking.eventSourceUrl,
-      userData: {
-        ...(req.body.tracking || {}),
-        name: result.customerName,
-        phone: result.customerPhone,
-        customerId: result.customerId,
-      },
-      customData: {
-        ...(req.body.landingTracking.customData || {}),
-        value: Number(result.totalBill),
-        currency: "BDT",
-        order_id: result.orderId || result.Id,
-      },
-    }, { headers: req.headers, ip: getClientIp(req) });
+  // Attribution saved with the order is rebuilt server-side; the client's copy is
+  // only a source for its own browser cookies (fbp/fbc) and page URL.
+  const tracking = await TrackingService.buildOrderTracking(req.body.tracking || {}, req);
+  // Admin dashboard previews of a landing page place real orders but must not
+  // count as Purchases. Setting the flag can only suppress a conversion.
+  const trackPurchase = req.body.trackingDisabled !== true;
+  const { trackingDisabled, ...body } = req.body;
+  const result = await OrderService.createOrderInDB(
+    { ...body, tracking, ipAddress: getClientIp(req) },
+    {
+      // Only a newly created website order counts as a Purchase; replays of the
+      // same checkout return the saved order without queuing anything.
+      onCreated: trackPurchase
+        ? (order) => TrackingService.enqueuePurchase(order).catch((error) => {
+          console.error(JSON.stringify({ scope: "meta_capi", orderId: order.Id, error: error.message }));
+        })
+        : undefined,
+    },
+  );
+  if (trackPurchase) {
+    // Same event_id and server-calculated values for the browser Pixel copy.
+    const purchase = TrackingService.buildPurchaseData(result);
+    result.purchaseEventId = purchase.eventId;
+    result.purchaseTracking = purchase;
   }
   sendResponse(res, {
     statusCode: 201,

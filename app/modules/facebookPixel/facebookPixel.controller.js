@@ -7,6 +7,7 @@ const insertIntoDB    = catchAsync(async (req, res) => { const r = await Service
 const getAllFromDB     = catchAsync(async (req, res) => { const r = await Service.getAllFromDB(pick(req.query, ["searchTerm"]), pick(req.query, ["limit","page","sortBy","sortOrder"])); sendResponse(res, { statusCode: 200, success: true, message: "Pixels fetched", meta: r.meta, data: r.data }); });
 const getPublicFromDB = catchAsync(async (req, res) => { const r = await Service.getPublicFromDB(); sendResponse(res, { statusCode: 200, success: true, message: "Public pixels fetched", data: r }); });
 const updateOneFromDB = catchAsync(async (req, res) => { const r = await Service.updateOneFromDB(req.params.id, req.body);                        sendResponse(res, { statusCode: 200, success: true, message: "Pixel updated", data: r }); });
+const testConnection  = catchAsync(async (req, res) => { const r = await Service.testConnection(req.params.id, pick(req.body || {}, ["testEventCode"])); sendResponse(res, { statusCode: 200, success: true, message: r.ok ? "Test event sent" : "Meta rejected the test event", data: r }); });
 const deleteIdFromDB  = catchAsync(async (req, res) => { const r = await Service.deleteIdFromDB(req.params.id);                                   sendResponse(res, { statusCode: 200, success: true, message: "Pixel deleted", data: r }); });
 
-module.exports = { insertIntoDB, getAllFromDB, getPublicFromDB, updateOneFromDB, deleteIdFromDB };
+module.exports = { insertIntoDB, getAllFromDB, getPublicFromDB, updateOneFromDB, testConnection, deleteIdFromDB };

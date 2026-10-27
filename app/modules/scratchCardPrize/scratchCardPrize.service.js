@@ -78,6 +78,34 @@ const updateOneFromDB = async (id, payload, file) => {
   return row;
 };
 
+// Products keep the prizes they come with as a JSON list of prize Ids; multipart
+// bodies send it as a JSON string. Returns null for "no prizes".
+const parsePrizeIds = (value) => {
+  let list = value;
+  if (typeof list === "string") {
+    if (!list.trim()) return null;
+    try { list = JSON.parse(list); } catch { return null; }
+  }
+  if (!Array.isArray(list)) return null;
+  const ids = [...new Set(list.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  return ids.length ? ids : null;
+};
+
+// Active prizes by Id, in the shape the storefront and orders show.
+const getPrizeMap = async (ids) => {
+  const cleanIds = [...new Set(ids.map(Number).filter((id) => id > 0))];
+  if (!cleanIds.length) return new Map();
+  const rows = await M().findAll({
+    where: { Id: { [Op.in]: cleanIds }, status: "Active" },
+    attributes: ["Id", "name", "nameBn", "image"],
+    raw: true,
+  });
+  return new Map(rows.map((row) => [Number(row.Id), row]));
+};
+
+const prizesFor = (prizeIds, prizeMap) =>
+  (parsePrizeIds(prizeIds) || []).map((id) => prizeMap.get(id)).filter(Boolean);
+
 const deleteIdFromDB = async (id) => {
   const row = await M().findOne({ where: { Id: id } });
   if (!row) throw new ApiError(404, "Prize not found");
@@ -87,4 +115,5 @@ const deleteIdFromDB = async (id) => {
 
 module.exports = {
   DEFAULT_PRIZES, seedDefaultPrizes, insertIntoDB, getAllFromDB, getPublicFromDB, updateOneFromDB, deleteIdFromDB,
+  parsePrizeIds, getPrizeMap, prizesFor,
 };

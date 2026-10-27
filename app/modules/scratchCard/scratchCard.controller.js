@@ -19,6 +19,11 @@ const submit = catchAsync(async (req, res) => {
   sendResponse(res, { statusCode: 201, success: true, message: "Scratch card submitted", data: result });
 });
 
+const createByStaff = catchAsync(async (req, res) => {
+  const result = await Service.createByStaff(req.body, req.file, req.user);
+  sendResponse(res, { statusCode: 201, success: true, message: "Scratch card created", data: result });
+});
+
 const getAllFromDB = catchAsync(async (req, res) => {
   const filters = pick(req.query, ["searchTerm", "status", "claimType", "reference", "phone", "submittedFrom", "submittedTo", "approvedFrom", "approvedTo", "assignedAgentId", "prize", "courierStatus", "crossProductId"]);
   const options = pick(req.query, ["limit", "page", "sortBy", "sortOrder"]);
@@ -57,6 +62,6 @@ const deleteIdFromDB = catchAsync(async (req, res) => {
 });
 
 module.exports = {
-  checkPhone, trackByPhone, submit, getAllFromDB, updateOneFromDB, deleteIdFromDB, getAgents, assignToAgent,
+  checkPhone, trackByPhone, submit, createByStaff, getAllFromDB, updateOneFromDB, deleteIdFromDB, getAgents, assignToAgent,
   sendToCourier, syncCourierStatus,
 };

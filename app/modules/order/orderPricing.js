@@ -1,6 +1,7 @@
 const { Op } = require("sequelize");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
+const { parsePrizeIds, getPrizeMap, prizesFor } = require("../scratchCardPrize/scratchCardPrize.service");
 const {
   getVariationOptions,
   variationSalePrice,
@@ -10,7 +11,7 @@ const {
 
 const MAX_ITEM_QTY = 1000;
 // Also the minimum: a lower charge in settings or on a landing page is raised to these.
-const DEFAULT_DHAKA_CHARGE = 80;
+const DEFAULT_DHAKA_CHARGE = 70;
 const DEFAULT_OUTSIDE_DHAKA_CHARGE = 130;
 
 const toQty = (value) => Math.min(Math.max(1, Math.floor(Number(value) || 1)), MAX_ITEM_QTY);
@@ -168,6 +169,9 @@ const priceLandingOrder = async (payload, landingPageId, strict) => {
 
 const priceWebsiteOrder = async (payload, strict) => {
   const products = await loadProducts(payload.items.map((item) => item.id));
+  const prizeMap = await getPrizeMap(
+    [...products.values()].flatMap((product) => parsePrizeIds(product.prizeIds) || []),
+  );
   let allFreeShipping = payload.items.length > 0;
 
   const items = payload.items.map((item) => {
@@ -202,6 +206,8 @@ const priceWebsiteOrder = async (payload, strict) => {
       price,
       qty,
       freeShipping,
+      // Recorded on the order so staff know which prize goes in the parcel.
+      prizes: prizesFor(product.prizeIds, prizeMap).map(({ Id, name, nameBn }) => ({ Id, name, nameBn })),
     };
   });
 

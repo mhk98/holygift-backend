@@ -1135,6 +1135,7 @@ const createOrderInDB = async (payload, options = {}) => {
     return { order, created: true };
   });
   if (!created) return toPublicOrder(order);
+  if (options.onCreated) await options.onCreated(order);
 
   await NotificationService.createForRoles(
     ["superAdmin", "admin", "cs"],

@@ -9,6 +9,8 @@ function load(path, db) {
     if (name === '../../../models') return db;
     if (name.includes('ApiError')) return class extends Error { constructor(code, message) { super(message); this.statusCode = code; } };
     if (name.includes('shared/productVariants')) return require('../shared/productVariants');
+    // Products in these fixtures carry no scratch card prizes.
+    if (name.includes('scratchCardPrize.service')) return { parsePrizeIds: () => null, getPrizeMap: async () => new Map(), prizesFor: () => [] };
     return require(name);
   } };
   vm.runInNewContext(fs.readFileSync(require.resolve(path), 'utf8'), context);
@@ -36,7 +38,7 @@ function pricingDb() {
       return { Id: 7, productId: 2, price: 999, regularData: JSON.stringify({ deliveryOutside: 150, productOptions: [{ productId: 2, name: 'Oud Offer', price: 850 }] }) };
     } },
     deliveryCharge: { async findAll() {
-      return [{ note: 'ঢাকার ভিতরে ৮০ টাকা', amount: '80.00' }, { note: 'ঢাকার বাইরে ১২০ টাকা', amount: '120.00' }];
+      return [{ note: 'ঢাকার ভিতরে ৭০ টাকা', amount: '70.00' }, { note: 'ঢাকার বাইরে ১২০ টাকা', amount: '120.00' }];
     } },
     variation: {},
   };
@@ -129,7 +131,7 @@ test('delivery charge and advance are decided by the server', async () => {
   const { priceOrderItems } = load('../app/modules/order/orderPricing', pricingDb());
   const item = { id: 2, qty: 1 };
   const dhaka = await priceOrderItems({ customerDistrict: 'Dhaka', deliveryCharge: 0, advance: 5000, items: [item] });
-  assert.equal(dhaka.deliveryCharge, 80);
+  assert.equal(dhaka.deliveryCharge, 70);
   assert.equal(dhaka.advance, 0);
   // Settings below the minimum (outside 120 < 130) are raised to it.
   assert.equal((await priceOrderItems({ customerDistrict: 'Khulna', items: [item] })).deliveryCharge, 130);
@@ -137,19 +139,19 @@ test('delivery charge and advance are decided by the server', async () => {
   assert.equal((await priceOrderItems({ items: [item] })).deliveryCharge, 130);
   // Every item ships free -> no charge; one paid item -> charge applies.
   assert.equal((await priceOrderItems({ customerDistrict: 'Dhaka', items: [{ id: 3, qty: 1 }] })).deliveryCharge, 0);
-  assert.equal((await priceOrderItems({ customerDistrict: 'Dhaka', items: [{ id: 3, qty: 1 }, item] })).deliveryCharge, 80);
+  assert.equal((await priceOrderItems({ customerDistrict: 'Dhaka', items: [{ id: 3, qty: 1 }, item] })).deliveryCharge, 70);
 
   const landing = await priceOrderItems({
     orderSource: 'Landing Page', tracking: { landingPageId: 7 }, customerDistrict: 'outside',
     items: [{ id: 2, name: 'Oud Offer', qty: 1 }],
   });
   assert.equal(landing.deliveryCharge, 150);
-  // Landing page inside charge is unset -> minimum 80.
+  // Landing page inside charge is unset -> minimum 70.
   const inside = await priceOrderItems({
     orderSource: 'Landing Page', tracking: { landingPageId: 7 }, customerDistrict: 'inside',
     items: [{ id: 2, name: 'Oud Offer', qty: 1 }],
   });
-  assert.equal(inside.deliveryCharge, 80);
+  assert.equal(inside.deliveryCharge, 70);
 });
 
 test('landing orders ship free when every linked product is free shipping', async () => {

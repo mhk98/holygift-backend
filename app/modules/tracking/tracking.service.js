@@ -1,243 +1,261 @@
-const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
 const { getClientIp } = require("../../utils/clientIp");
 const FacebookPixelService = require("../facebookPixel/facebookPixel.service");
-const TiktokPixelService = require("../tiktokPixel/tiktokPixel.service");
-const GoogleAdsService = require("../googleAds/googleAds.service");
+const MetaCapi = require("./metaCapi.service");
+const { buildUserData } = require("./metaUserData");
 
-const hash = (value) => {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) return undefined;
-  return crypto.createHash("sha256").update(normalized).digest("hex");
+// Meta Pixel + Conversions API. The browser fires PageView, ViewContent,
+// AddToCart and InitiateCheckout itself and posts the same event_id here for the
+// server copy. Purchase is never accepted from the browser: it is built from the
+// saved order (see buildPurchaseEvent) when the order is created.
+
+const BROWSER_EVENTS = new Set(["PageView", "ViewContent", "AddToCart", "InitiateCheckout"]);
+const CURRENCY = "BDT";
+const MAX_ITEMS = 50;
+
+const siteUrl = () => (process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://holygift.xyz").replace(/\/$/, "");
+
+const getPublicConfig = async () => ({ metaPixels: await FacebookPixelService.getPublicFromDB() });
+
+// ---------------------------------------------------------------------------
+// Input sanitising (the tracking endpoint is public)
+// ---------------------------------------------------------------------------
+
+const text = (value, max) => {
+  const str = String(value ?? "").trim();
+  return str ? str.slice(0, max) : undefined;
+};
+const amount = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= 1e8 ? Math.round(n * 100) / 100 : undefined;
+};
+const quantity = (value) => {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 1000 ? n : undefined;
+};
+const contentId = (value) => {
+  const id = text(value, 64);
+  return id && /^[\w.-]+$/.test(id) ? id : undefined;
 };
 
-const hashPhone = (value) => {
-  const digits = String(value || "").replace(/\D/g, "");
-  return hash(/^01\d{9}$/.test(digits) ? `88${digits}` : digits);
-};
-const asHashArray = (value) => value ? [value] : undefined;
-
-const PLATFORM_EVENT_NAMES = {
-  PageView: { meta: "PageView", tiktok: "Pageview" },
-  ViewContent: { meta: "ViewContent", tiktok: "ViewContent" },
-  Search: { meta: "Search", tiktok: "Search" },
-  AddToCart: { meta: "AddToCart", tiktok: "AddToCart" },
-  InitiateCheckout: { meta: "InitiateCheckout", tiktok: "InitiateCheckout" },
-  AddPaymentInfo: { meta: "AddPaymentInfo", tiktok: "AddPaymentInfo" },
-  Lead: { meta: "Lead", tiktok: "SubmitForm" },
-  Contact: { meta: "Contact", tiktok: "Contact" },
-  Purchase: { meta: "Purchase", tiktok: "CompletePayment" },
+const eventSourceUrl = (value) => {
+  try {
+    const url = new URL(String(value || ""));
+    return ["http:", "https:"].includes(url.protocol) ? url.toString().slice(0, 1000) : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
-const getPlatformEventName = (eventName, platform) =>
-  PLATFORM_EVENT_NAMES[eventName]?.[platform] || eventName;
-
-const clean = (obj) =>
-  Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined && value !== null && value !== ""));
-
-const postJson = async (url, payload, headers = {}) => {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(10000),
+const sanitizeContents = (contents) =>
+  (Array.isArray(contents) ? contents : []).slice(0, MAX_ITEMS).flatMap((item) => {
+    const id = contentId(item?.id);
+    const qty = quantity(item?.quantity) || 1;
+    if (!id) return [];
+    const price = amount(item?.item_price);
+    return [{ id, quantity: qty, ...(price !== undefined ? { item_price: price } : {}) }];
   });
-  const data = await res.json().catch(() => ({}));
-  return { ok: res.ok && !data.error && !data.partialFailureError && (!('code' in data) || Number(data.code) === 0), status: res.status, data };
-};
 
-const toMetaEvent = ({ eventName, eventId, eventSourceUrl, userData, customData, ipAddress, userAgent }) => ({
-  event_name: eventName,
-  event_time: Math.floor(Date.now() / 1000),
-  event_id: eventId,
-  action_source: "website",
-  event_source_url: eventSourceUrl,
-  user_data: clean({
-    client_ip_address: ipAddress,
-    client_user_agent: userAgent,
-    em: asHashArray(hash(userData?.email)),
-    ph: asHashArray(hashPhone(userData?.phone)),
-    fn: asHashArray(hash(userData?.firstName || userData?.name)),
-    external_id: asHashArray(hash(userData?.customerId)),
-    fbp: userData?.fbp,
-    fbc: userData?.fbc,
-  }),
-  custom_data: clean(customData || {}),
-});
-
-const sendMeta = async (payload, context) => {
-  const pixels = await FacebookPixelService.getActiveFromDB();
-  const results = [];
-  for (const pixel of pixels) {
-    const row = pixel.toJSON();
-    if (!row.pixelsId || !row.metaAccessToken) continue;
-    const apiVersion = process.env.META_GRAPH_API_VERSION || "v23.0";
-    const url = `https://graph.facebook.com/${apiVersion}/${encodeURIComponent(row.pixelsId)}/events?access_token=${encodeURIComponent(row.metaAccessToken)}`;
-    const body = {
-      data: [toMetaEvent({
-        ...payload,
-        eventName: getPlatformEventName(payload.eventName, "meta"),
-        ...context,
-      })],
-      ...(process.env.NODE_ENV !== "production" && row.testEventId ? { test_event_code: row.testEventId } : {}),
-    };
-    results.push({ platform: "meta", pixelId: row.pixelsId, ...(await postJson(url, body)) });
-  }
-  return results;
-};
-
-const toTiktokEvent = ({ eventName, eventId, eventSourceUrl, referrerUrl, userData, customData, ipAddress, userAgent }) => ({
-  event: getPlatformEventName(eventName, "tiktok"),
-  event_id: eventId,
-  event_time: Math.floor(Date.now() / 1000),
-  user: clean({
-    ip: ipAddress,
-    user_agent: userAgent,
-    email: hash(userData?.email),
-    phone: hashPhone(userData?.phone),
-    external_id: hash(userData?.customerId),
-    ttclid: userData?.ttclid,
-    ttp: userData?.ttp,
-  }),
-  properties: clean(customData || {}),
-  page: clean({ url: eventSourceUrl, referrer: referrerUrl }),
-});
-
-const sendTiktok = async (payload, context) => {
-  const pixels = await TiktokPixelService.getActiveFromDB();
-  const results = [];
-  for (const pixel of pixels) {
-    const row = pixel.toJSON();
-    if (!row.pixelCode || !row.accessToken) continue;
-    const body = {
-      pixel_code: row.pixelCode,
-      event_source: "web",
-      event_source_id: row.pixelCode,
-      data: [toTiktokEvent({ ...payload, ...context })],
-      ...(process.env.NODE_ENV !== "production" && row.testEventCode ? { test_event_code: row.testEventCode } : {}),
-    };
-    results.push({
-      platform: "tiktok",
-      pixelCode: row.pixelCode,
-      ...(await postJson("https://business-api.tiktok.com/open_api/v1.3/event/track/", body, {
-        "Access-Token": row.accessToken,
-      })),
-    });
-  }
-  return results;
-};
-
-const getGoogleAccessToken = async (config = {}) => {
-  const clientId = config.clientId || process.env.GOOGLE_ADS_CLIENT_ID;
-  const clientSecret = config.clientSecret || process.env.GOOGLE_ADS_CLIENT_SECRET;
-  const refreshToken = config.refreshToken || process.env.GOOGLE_ADS_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) return null;
-
-  const body = new URLSearchParams({
-    client_id: clientId,
-    client_secret: clientSecret,
-    refresh_token: refreshToken,
-    grant_type: "refresh_token",
-  });
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.access_token) {
-    throw new Error(data.error_description || data.error || "Google Ads token request failed");
-  }
-  return data.access_token;
-};
-
-const getGoogleClickId = (userData = {}) =>
-  userData.gclid || userData.gbraid || userData.wbraid || null;
-
-const sendGoogleAds = async (payload) => {
-  if (payload.eventName !== "Purchase") return [];
-
-  const configs = await GoogleAdsService.getActiveFromDB();
-  const results = [];
-  for (const config of configs) {
-    const row = config.toJSON();
-    const developerToken = row.developerToken || process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-    const accessToken = await getGoogleAccessToken(row);
-    if (!developerToken || !accessToken) {
-      results.push({
-        platform: "google_ads",
-        conversionId: row.conversionId,
-        ok: false,
-        skipped: true,
-        reason: "Google Ads server credentials are not configured",
-      });
-      continue;
-    }
-    const customerId = String(row.customerId || process.env.GOOGLE_ADS_CUSTOMER_ID || "").replace(/\D/g, "");
-    const conversionActionId = String(row.conversionActionId || process.env.GOOGLE_ADS_CONVERSION_ACTION_ID || "").trim();
-    const clickId = getGoogleClickId(payload.userData);
-    if (!customerId || !conversionActionId || !clickId) {
-      results.push({
-        platform: "google_ads",
-        conversionId: row.conversionId,
-        ok: false,
-        skipped: true,
-        reason: "Missing customerId, conversionActionId, or Google click id",
-      });
-      continue;
-    }
-
-    const conversion = {
-      conversionAction: `customers/${customerId}/conversionActions/${conversionActionId}`,
-      conversionDateTime: new Date().toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "+00:00"),
-      conversionValue: Number(payload.customData?.value || 0),
-      currencyCode: payload.customData?.currency || "BDT",
-      orderId: String(payload.customData?.order_id || payload.eventId),
-      ...(payload.userData?.gclid ? { gclid: payload.userData.gclid } : {}),
-      ...(payload.userData?.gbraid ? { gbraid: payload.userData.gbraid } : {}),
-      ...(payload.userData?.wbraid ? { wbraid: payload.userData.wbraid } : {}),
-    };
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      "developer-token": developerToken,
-    };
-    const loginCustomerId = String(row.loginCustomerId || process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "").replace(/\D/g, "");
-    if (loginCustomerId) headers["login-customer-id"] = loginCustomerId;
-
-    const url = `https://googleads.googleapis.com/v17/customers/${customerId}:uploadClickConversions`;
-    results.push({
-      platform: "google_ads",
-      conversionId: row.conversionId,
-      ...(await postJson(url, { conversions: [conversion], partialFailure: true }, headers)),
-    });
-  }
-  return results;
-};
-
-const getPublicConfig = async () => {
-  const [metaPixels, tiktokPixels, googleAds] = await Promise.all([
-    FacebookPixelService.getPublicFromDB(),
-    TiktokPixelService.getPublicFromDB(),
-    GoogleAdsService.getPublicFromDB(),
-  ]);
-  return { metaPixels, tiktokPixels, googleAds };
-};
-
-const trackEvent = async (payload, req) => {
-  const eventName = String(payload.eventName || "").trim();
-  if (!eventName) throw new ApiError(400, "eventName is required");
-  const eventId = payload.eventId || `${eventName}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
-  const context = {
-    ipAddress: getClientIp(req),
-    userAgent: req.headers["user-agent"],
+const sanitizeCustomData = (eventName, raw = {}) => {
+  if (eventName === "PageView") return undefined;
+  const contents = sanitizeContents(raw.contents);
+  const contentIds = contents.length
+    ? contents.map((item) => item.id)
+    : (Array.isArray(raw.content_ids) ? raw.content_ids : []).slice(0, MAX_ITEMS).map(contentId).filter(Boolean);
+  const data = {
+    content_type: "product",
+    content_ids: contentIds.length ? contentIds : undefined,
+    contents: contents.length ? contents : undefined,
+    content_name: text(raw.content_name, 200),
+    content_category: text(raw.content_category, 100),
+    value: amount(raw.value),
+    currency: CURRENCY,
+    num_items: eventName === "InitiateCheckout"
+      ? contents.reduce((sum, item) => sum + item.quantity, 0) || undefined
+      : undefined,
   };
-  const basePayload = { ...payload, eventName, eventId };
-  const [meta, tiktok, googleAds] = await Promise.all([
-    sendMeta(basePayload, context).catch((error) => [{ platform: "meta", ok: false, error: error.message }]),
-    sendTiktok(basePayload, context).catch((error) => [{ platform: "tiktok", ok: false, error: error.message }]),
-    sendGoogleAds(basePayload).catch((error) => [{ platform: "google_ads", ok: false, error: error.message }]),
-  ]);
-  return { eventId, results: [...meta, ...tiktok, ...googleAds] };
+  return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
 };
 
-module.exports = { getPublicConfig, trackEvent };
+// ---------------------------------------------------------------------------
+// Customer identity (only from a verified customer token, never from the body)
+// ---------------------------------------------------------------------------
+
+const getCustomerFromRequest = async (req) => {
+  const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  try {
+    const verified = jwt.verify(token, process.env.TOKEN_SECRET);
+    const user = await db.user.findOne({
+      where: { Id: verified.Id },
+      attributes: ["Id", "FirstName", "LastName", "Email", "Phone", "City", "PostalCode", "Country", "role", "status"],
+      raw: true,
+    });
+    if (!user || String(user.role || "").toLowerCase() !== "user" || user.status === "Inactive") return null;
+    return user;
+  } catch {
+    return null;
+  }
+};
+
+const customerMatchData = (customer) => customer ? {
+  externalId: `customer_${customer.Id}`,
+  email: customer.Email,
+  phone: customer.Phone,
+  firstName: customer.FirstName,
+  lastName: customer.LastName,
+  city: customer.City,
+  zip: customer.PostalCode,
+  country: customer.Country && /^[a-z]{2}$/i.test(customer.Country) ? customer.Country : "bd",
+} : {};
+
+// ---------------------------------------------------------------------------
+// Browser events
+// ---------------------------------------------------------------------------
+
+const trackEvent = async (payload = {}, req) => {
+  const eventName = String(payload.eventName || "").trim();
+  if (!BROWSER_EVENTS.has(eventName)) throw new ApiError(400, "Unsupported tracking event");
+  const eventId = String(payload.eventId || "").trim();
+  if (!/^[\w.:-]{8,128}$/.test(eventId)) throw new ApiError(400, "A valid eventId is required");
+
+  const customer = await getCustomerFromRequest(req);
+  const event = {
+    event_name: eventName,
+    event_time: Math.floor(Date.now() / 1000),
+    event_id: eventId,
+    action_source: "website",
+    event_source_url: eventSourceUrl(payload.eventSourceUrl) || siteUrl(),
+    user_data: buildUserData({
+      ...customerMatchData(customer),
+      fbp: payload.attribution?.fbp,
+      fbc: payload.attribution?.fbc,
+      ipAddress: getClientIp(req),
+      userAgent: req.headers["user-agent"],
+    }),
+    custom_data: sanitizeCustomData(eventName, payload.customData),
+  };
+  if (!event.custom_data) delete event.custom_data;
+
+  // The browser does not wait for Meta; failures are retried and logged server-side.
+  MetaCapi.dispatchLive(event).catch(() => {});
+  return { accepted: true };
+};
+
+// ---------------------------------------------------------------------------
+// Purchase
+// ---------------------------------------------------------------------------
+
+const purchaseEventId = (order) => `purchase_order_${order.Id}`;
+
+const parseMeta = (note) => {
+  if (note && typeof note === "object") return note;
+  try { return JSON.parse(note || "{}") || {}; } catch { return {}; }
+};
+
+/**
+ * Purchase data from the saved order (server-priced items). Revenue policy:
+ * value = product total − coupon/discount; delivery charge is excluded.
+ */
+const buildPurchaseData = (order) => {
+  const meta = parseMeta(order.note);
+  const items = Array.isArray(meta.items) ? meta.items : [];
+  const contents = items.slice(0, MAX_ITEMS).flatMap((item) => {
+    const id = contentId(item.id);
+    const qty = quantity(item.qty) || 1;
+    const price = amount(item.price) || 0;
+    return id ? [{ id, quantity: qty, item_price: price }] : [];
+  });
+  const productTotal = items.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.qty) || 0), 0);
+  const value = Math.max(0, Math.round((productTotal - (Number(meta.discount) || 0)) * 100) / 100);
+  return {
+    eventId: purchaseEventId(order),
+    order_id: String(order.orderId || order.Id),
+    content_type: "product",
+    content_ids: contents.map((item) => item.id),
+    contents,
+    content_name: text(items.map((item) => item.name).filter(Boolean).join(", "), 200),
+    num_items: contents.reduce((sum, item) => sum + item.quantity, 0),
+    value,
+    currency: CURRENCY,
+  };
+};
+
+const buildPurchaseEvent = (order, customer = null) => {
+  const meta = parseMeta(order.note);
+  const tracking = meta.tracking || {};
+  const account = customerMatchData(customer);
+  const { eventId, ...customData } = buildPurchaseData(order);
+  return {
+    event_name: "Purchase",
+    // The conversion happens now, even when an earlier draft row becomes the order.
+    event_time: Math.floor(Date.now() / 1000),
+    event_id: eventId,
+    action_source: "website",
+    event_source_url: eventSourceUrl(tracking.eventSourceUrl) || siteUrl(),
+    user_data: buildUserData({
+      // The order's own details win; the logged-in account only fills the gaps.
+      externalId: account.externalId,
+      email: account.email,
+      zip: account.zip,
+      phone: order.customerPhone || account.phone,
+      name: order.customerName,
+      city: order.customerDistrict || account.city,
+      country: account.country || "bd",
+      fbp: tracking.fbp,
+      fbc: tracking.fbc,
+      ipAddress: order.ipAddress,
+      userAgent: tracking.userAgent,
+    }),
+    custom_data: customData,
+  };
+};
+
+/** Queues the order's single Purchase for every active pixel; repeats are no-ops. */
+const enqueuePurchase = async (order) => {
+  const plain = order.get ? order.get({ plain: true }) : order;
+  const customerUserId = Number(parseMeta(plain.note).tracking?.customerUserId) || null;
+  const customer = customerUserId
+    ? await db.user.findOne({
+      where: { Id: customerUserId },
+      attributes: ["Id", "FirstName", "LastName", "Email", "Phone", "City", "PostalCode", "Country"],
+      raw: true,
+    })
+    : null;
+  await MetaCapi.enqueue(buildPurchaseEvent(plain, customer));
+};
+
+/**
+ * Server-controlled attribution saved with the order: the browser's fbp/fbc and
+ * page URL (validated) plus the request's user agent and the verified customer.
+ */
+const buildOrderTracking = async (clientTracking = {}, req) => {
+  const customer = await getCustomerFromRequest(req);
+  const keep = (key) => text(clientTracking[key], 500);
+  return Object.fromEntries(Object.entries({
+    fbp: keep("fbp"),
+    fbc: keep("fbc"),
+    ttp: keep("ttp"),
+    ttclid: keep("ttclid"),
+    gclid: keep("gclid"),
+    gbraid: keep("gbraid"),
+    wbraid: keep("wbraid"),
+    landingPageId: clientTracking.landingPageId,
+    eventSourceUrl: eventSourceUrl(clientTracking.eventSourceUrl),
+    userAgent: text(req.headers["user-agent"], 500),
+    customerUserId: customer?.Id,
+  }).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+};
+
+module.exports = {
+  getPublicConfig,
+  trackEvent,
+  buildPurchaseData,
+  buildPurchaseEvent,
+  enqueuePurchase,
+  buildOrderTracking,
+  purchaseEventId,
+  sanitizeCustomData,
+};

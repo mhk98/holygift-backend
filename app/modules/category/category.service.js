@@ -122,7 +122,7 @@ const getAllFromDBWithoutQuery = async () => {
 const getPublicMenu = async () => {
   const [categories, subcategories, childcategories] = await Promise.all([
     Category.findAll({
-      attributes: ["Id", "name", "sortOrder", "isActive", "frontView", "imageFile", "image"],
+      attributes: ["Id", "name", "sortOrder", "isActive", "frontView", "imageFile", "image", "bannerImage", "bannerTitle"],
       where: {
         status: { [Op.ne]: "Inactive" },
       },
@@ -188,6 +188,8 @@ const getPublicMenu = async () => {
     // Rows not yet migrated may still hold multi-MB base64 strings; never
     // ship those in the public menu.
     imageFile: [category.imageFile, category.image].find((file) => file && !isInlineImage(file)) || null,
+    bannerImage: category.bannerImage && !isInlineImage(category.bannerImage) ? category.bannerImage : null,
+    bannerTitle: category.bannerTitle || null,
   }));
 };
 

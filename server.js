@@ -30,6 +30,9 @@ const courierSyncWorker = createCourierSyncWorker({
   service: require("./app/modules/order/order.service"),
 });
 // Scratch card prizes sent to the courier, until they are delivered/cancelled/returned.
+// Delivers queued Meta Purchase events (MetaEventOutbox) with retries.
+const metaOutboxWorker =
+  require("./app/modules/tracking/metaCapi.service").createOutboxWorker();
 const scratchCardCourierSyncWorker = createCourierSyncWorker({
   entityLabel: "scratch card",
   Order: db.scratchCard,
@@ -180,6 +183,18 @@ const apiLimiter = rateLimit({
 app.use("/api/v1/user/login", authLimiter);
 app.use("/api/v1/user/refresh-token", authLimiter);
 app.use("/api/v1/user/register", authLimiter);
+// Public tracking endpoint: a visitor fires a handful of events per page.
+app.use(
+  "/api/v1/tracking/events",
+  rateLimit({
+    ...limiterDefaults,
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { status: "error", message: "Too many tracking events." },
+  }),
+);
 app.use("/api/v1", apiLimiter);
 
 /* ========================
@@ -386,6 +401,7 @@ const startServer = async () => {
         courierSyncWorker.start();
         scratchCardCourierSyncWorker.start();
       }
+      metaOutboxWorker.start();
     });
   } catch (error) {
     console.error("❌ Failed to connect to database:", error.message);
@@ -408,6 +424,7 @@ process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
   await courierSyncWorker.stop();
   await scratchCardCourierSyncWorker.stop();
+  await metaOutboxWorker.stop();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -419,6 +436,7 @@ process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
   await courierSyncWorker.stop();
   await scratchCardCourierSyncWorker.stop();
+  await metaOutboxWorker.stop();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");

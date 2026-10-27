@@ -28,18 +28,23 @@ const checkPhone = async (phone) => {
 };
 
 // Public tracking by phone. Returns only what the customer needs to follow a
-// claim; name, address, card image and admin notes stay private.
+// claim; name, address and card image stay private, and the admin note is
+// shown only on a rejected card as the reason.
 const trackByPhone = async (phone) => {
   const normalized = String(phone || "").trim();
   if (!PHONE_PATTERN.test(normalized)) throw new ApiError(400, "Invalid phone number");
-  return ScratchCard().findAll({
+  const rows = await ScratchCard().findAll({
     where: { phone: normalized },
-    attributes: ["Id", "referenceCode", "prize", "status", "claimType", "courier", "trackingCode", "createdAt", "updatedAt"],
+    attributes: ["Id", "referenceCode", "prize", "status", "claimType", "courier", "trackingCode", "note", "createdAt", "updatedAt"],
     order: [["createdAt", "DESC"]],
+  });
+  return rows.map((row) => {
+    const { note, ...rest } = row.get({ plain: true });
+    return { ...rest, note: rest.status === "Rejected" && note ? note : null };
   });
 };
 
-const submit = async (data, file) => {
+const claimFields = (data) => {
   const fullName = String(data.fullName || "").trim();
   const phone = String(data.phone || "").trim();
   const address = String(data.address || "").trim();
@@ -52,6 +57,40 @@ const submit = async (data, file) => {
   // Pathao rejects shorter delivery addresses.
   if (address.length < 10) throw new ApiError(400, "পুরো ঠিকানা লিখুন (গ্রাম/এলাকা, থানা, জেলা) — কমপক্ষে ১০ অক্ষর");
   if (prize.length > 64) throw new ApiError(400, "Prize name is too long");
+  return { fullName, phone, address, prize };
+};
+
+// A clash on the unique reference code is very unlikely; just draw a new one.
+const createWithReference = async (values) => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await ScratchCard().create({ ...values, referenceCode: generateReferenceCode() });
+    } catch (error) {
+      if (error.name !== "SequelizeUniqueConstraintError" || attempt >= 4) throw error;
+    }
+  }
+};
+
+// Staff entering a claim by hand (e.g. taken over the phone). The card image
+// is optional, and a phone that already claimed simply gets a repeat claim.
+const createByStaff = async (data, file, user) => {
+  const fields = claimFields(data);
+  const note = String(data.note || "").trim() || null;
+  const previousClaims = await countClaimsForPhone(fields.phone);
+  return createWithReference({
+    ...fields,
+    image: file ? file.filename : "",
+    note,
+    claimType: previousClaims > 0 ? "repeat" : "first",
+    // An agent's list only shows their own claims, so they keep what they enter.
+    ...(isAgent(user)
+      ? { assignedAgentId: user.Id, assignedAgentName: displayName(user), assignedById: user.Id, assignedAt: new Date() }
+      : {}),
+  });
+};
+
+const submit = async (data, file) => {
+  const { fullName, phone, address, prize } = claimFields(data);
   if (!file) throw new ApiError(400, "Scratch card image is required");
 
   // A phone that already claimed may only submit again through the
@@ -62,22 +101,14 @@ const submit = async (data, file) => {
     throw new ApiError(409, "This phone number has already claimed a scratch card prize");
   }
 
-  // A clash on the unique reference code is very unlikely; just draw a new one.
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await ScratchCard().create({
-        referenceCode: generateReferenceCode(),
-        fullName,
-        phone,
-        address,
-        prize,
-        image: file.filename,
-        claimType: previousClaims > 0 ? "repeat" : "first",
-      });
-    } catch (error) {
-      if (error.name !== "SequelizeUniqueConstraintError" || attempt >= 4) throw error;
-    }
-  }
+  return createWithReference({
+    fullName,
+    phone,
+    address,
+    prize,
+    image: file.filename,
+    claimType: previousClaims > 0 ? "repeat" : "first",
+  });
 };
 
 // Earlier claims from the same phones, so a repeat claim can be checked
@@ -216,7 +247,7 @@ const getAllFromDB = async (filters, options, user) => {
     andConditions.push({ assignedAgentId: Number(filters.assignedAgentId) });
   }
   // A reference code finds that one claim; a phone finds every claim from it.
-  // Both look across first and repeat claims so nothing for the customer is hidden.
+  // Both stay within the page's claim type, so first and repeat cards never mix.
   if (reference) andConditions.push({ referenceCode: reference });
   if (phone) andConditions.push({ phone });
   if (searchTerm) {
@@ -246,7 +277,7 @@ const getAllFromDB = async (filters, options, user) => {
   }
   // Claims made before the wall watch was renamed still say "Big Size Wall Watch".
   if (prize) andConditions.push({ prize: prize === "Luxury Wall Watch" ? [prize, "Big Size Wall Watch"] : prize });
-  if (claimType && !reference && !phone) {
+  if (claimType) {
     if (!SCRATCH_CARD_CLAIM_TYPES.includes(claimType)) throw new ApiError(400, "Invalid claim type");
     andConditions.push({ claimType });
   }
@@ -371,5 +402,5 @@ const deleteIdFromDB = async (id) => {
 
 module.exports = {
   isCustomer,
-  checkPhone, trackByPhone, submit, getAllFromDB, updateOneFromDB, deleteIdFromDB, getAgents, assignToAgent,
+  checkPhone, trackByPhone, submit, createByStaff, getAllFromDB, updateOneFromDB, deleteIdFromDB, getAgents, assignToAgent,
 };

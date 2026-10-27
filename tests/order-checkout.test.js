@@ -41,6 +41,7 @@ function setup() {
     if (name.includes('couponCode.service')) return { validateCoupon: async () => { throw Error('expired coupon'); } };
     if (name === './orderPricing') return { priceOrderItems: async (payload) => payload };
     if (name === './orderStock') return { registerOrderStockHooks() {} };
+    if (name === './courierCooldown') return require('../app/modules/order/courierCooldown');
     if (name === 'crypto' || name === 'sequelize') return require(name);
     if (name.includes('ApiError')) return class extends Error { constructor(code, message) { super(message); this.statusCode = code; } };
     return {};

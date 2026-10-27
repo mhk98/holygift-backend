@@ -150,6 +150,10 @@ db.facebookPixel = require("../app/modules/facebookPixel/facebookPixel.model")(
   db.sequelize,
   DataTypes,
 );
+db.metaEventOutbox = require("../app/modules/tracking/metaEventOutbox.model")(
+  db.sequelize,
+  DataTypes,
+);
 db.tiktokPixel = require("../app/modules/tiktokPixel/tiktokPixel.model")(
   db.sequelize,
   DataTypes,
@@ -401,6 +405,7 @@ const ensureProductStatusNoteColumns = async () => {
     allowNull: true,
   });
   await maybeAdd("brandId", { type: DataTypes.INTEGER(10), allowNull: true });
+  await maybeAdd("prizeIds", { type: DataTypes.JSON, allowNull: true });
   await maybeAdd("productVideo", {
     type: DataTypes.STRING(500),
     allowNull: true,
@@ -512,6 +517,7 @@ const ensureCategoryFrontendColumns = async () => {
     type: DataTypes.TEXT("long"),
     allowNull: true,
   });
+  await maybeAdd("bannerTitle", { type: DataTypes.STRING, allowNull: true });
   await maybeAdd("sortOrder", { type: DataTypes.INTEGER(10), allowNull: true });
   await maybeAdd("isActive", {
     type: DataTypes.BOOLEAN,
@@ -1041,6 +1047,30 @@ const ensureOrderAssignmentColumns = async () => {
   });
 };
 
+const ensureFacebookPixelColumns = async () => {
+  const queryInterface = db.sequelize.getQueryInterface();
+  const tableName = db.facebookPixel.getTableName();
+  const tableDefinition = await queryInterface.describeTable(tableName);
+  const maybeAdd = async (columnName, definition) => {
+    if (!hasColumn(tableDefinition, columnName)) {
+      await queryInterface.addColumn(tableName, columnName, definition);
+    }
+  };
+  await maybeAdd("lastSuccessAt", { type: DataTypes.DATE, allowNull: true });
+  await maybeAdd("lastErrorAt", { type: DataTypes.DATE, allowNull: true });
+  await maybeAdd("lastError", { type: DataTypes.STRING(500), allowNull: true });
+
+  // Tokens saved before encryption existed are encrypted once the key is configured.
+  if (!process.env.TRACKING_SECRET_KEY) return;
+  const { encrypt, isEncrypted } = require("../helpers/secretBox");
+  const rows = await db.facebookPixel.findAll({ attributes: ["Id", "metaAccessToken"], paranoid: false });
+  for (const row of rows) {
+    if (row.metaAccessToken && !isEncrypted(row.metaAccessToken)) {
+      await row.update({ metaAccessToken: encrypt(row.metaAccessToken) }, { silent: true });
+    }
+  }
+};
+
 // =====================
 // Sync
 // =====================
@@ -1088,6 +1118,7 @@ db.ready = db.sequelize
     await ensureOrderAssignmentColumns();
     await ensureLandingPageContentColumns();
     await ensureScratchCardColumns();
+    await ensureFacebookPixelColumns();
     await require("../app/modules/scratchCardPrize/scratchCardPrize.service").seedDefaultPrizes();
     console.log("Connection re-synced successfully");
   })

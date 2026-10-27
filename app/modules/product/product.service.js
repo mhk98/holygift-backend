@@ -10,6 +10,7 @@ const {
   variationRegularPrice,
 } = require("../../../shared/productVariants");
 const { ProductSearchableFields } = require("./product.constants");
+const { parsePrizeIds, getPrizeMap, prizesFor } = require("../scratchCardPrize/scratchCardPrize.service");
 const Product = db.product;
 const Variation = db.variation;
 const SupplierHistory = db.supplierHistory;
@@ -277,6 +278,29 @@ const syncProductNameReferences = async (
   );
 };
 
+// URL-safe slug; Bangla-only names give "" and the product is linked by Id instead.
+const slugify = (value) =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 200);
+
+// Product URLs are /product/<slug>, so a taken slug gets a -2, -3, ... suffix.
+const uniqueSlug = async (value, exceptId, transaction) => {
+  const base = slugify(value);
+  if (!base) return null;
+  const where = { slug: { [Op.like]: `${base}%` } };
+  if (exceptId) where.Id = { [Op.ne]: exceptId };
+  const taken = new Set(
+    (await Product.findAll({ attributes: ["slug"], where, transaction, raw: true })).map((row) => row.slug),
+  );
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+};
+
 const insertIntoDB = async (data, files = []) => {
   const {
     name, slug, sku,
@@ -284,7 +308,7 @@ const insertIntoDB = async (data, files = []) => {
     productVideo, advanceAmount, stockAlert,
     description, shortDescription,
     metaTitle, metaKeyword, metaDescription,
-    giftTitle, giftPrice,
+    giftTitle, giftPrice, prizeIds,
     bestDeals, freeShipping, status,
     variations: variationsRaw,
     purchaseEnabled, supplierId, payAmount, purchaseDate,
@@ -295,7 +319,7 @@ const insertIntoDB = async (data, files = []) => {
 
   const payload = {
     name,
-    slug: slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+    slug:            await uniqueSlug(slug || name),
     sku:             sku             || null,
     categoryId:      categoryId      ? Number(categoryId)      : null,
     subcategoryId:   subcategoryId   ? Number(subcategoryId)   : null,
@@ -312,6 +336,7 @@ const insertIntoDB = async (data, files = []) => {
     giftTitle:       giftTitle       || null,
     giftPrice:       giftPrice       ? Number(giftPrice)       : null,
     images:          imagePaths.length ? imagePaths : null,
+    prizeIds:        parsePrizeIds(prizeIds),
     bestDeals:       bestDeals === 'true'    || bestDeals === true,
     freeShipping:    freeShipping === 'true' || freeShipping === true,
     status:          status || "Active",
@@ -449,7 +474,7 @@ const updateOneFromDB = async (id, payload, files = []) => {
     productVideo, advanceAmount, stockAlert,
     description, shortDescription,
     metaTitle, metaKeyword, metaDescription,
-    giftTitle, giftPrice,
+    giftTitle, giftPrice, prizeIds,
     bestDeals, freeShipping, status,
     variations: variationsRaw,
     keptImages: keptImagesRaw,
@@ -470,27 +495,29 @@ const updateOneFromDB = async (id, payload, files = []) => {
 
     const data = {
       name,
-      slug: slug || String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,''),
+      slug:            await uniqueSlug(slug || name, Number(id), transaction),
       sku:             sku             || null,
       categoryId:      categoryId      ? Number(categoryId)      : null,
       subcategoryId:   subcategoryId   ? Number(subcategoryId)   : null,
       childcategoryId: childcategoryId ? Number(childcategoryId) : null,
       brandId:         brandId         ? Number(brandId)         : null,
       productVideo:    productVideo    || null,
-      advanceAmount:   advanceAmount   ? Number(advanceAmount)   : null,
       stockAlert:      stockAlert      ? Number(stockAlert)      : null,
       description:     description     || null,
       shortDescription:shortDescription|| null,
       metaTitle:       metaTitle       || null,
       metaKeyword:     metaKeyword     || null,
       metaDescription: metaDescription || null,
-      giftTitle:       giftTitle       || null,
-      giftPrice:       giftPrice       ? Number(giftPrice)       : null,
       images:          mergedImages.length ? mergedImages : null,
-      bestDeals:       bestDeals === 'true'    || bestDeals === true,
       freeShipping:    freeShipping === 'true' || freeShipping === true,
       status:          status || "Active",
     };
+    // Fields the admin form no longer (or not yet) sends keep their saved value.
+    if (prizeIds !== undefined) data.prizeIds = parsePrizeIds(prizeIds);
+    if (advanceAmount !== undefined) data.advanceAmount = advanceAmount ? Number(advanceAmount) : null;
+    if (giftTitle !== undefined) data.giftTitle = giftTitle || null;
+    if (giftPrice !== undefined) data.giftPrice = giftPrice ? Number(giftPrice) : null;
+    if (bestDeals !== undefined) data.bestDeals = bestDeals === 'true' || bestDeals === true;
 
     await Product.update(data, { where: { Id: id }, transaction });
 
@@ -647,10 +674,32 @@ const toStorefrontProduct = (product, maps = {}) => {
     options: [...optionGroups].map(([name, values]) => ({ name, values })),
     variants,
     sku: plain.sku,
+    // Slugs shared by older products are left out so each link opens the right one.
+    slug: plain.slug && !maps.sharedSlugs?.has(plain.slug) ? plain.slug : null,
+    brand: maps.brands?.get(Number(plain.brandId)) || null,
+    productVideo: plain.productVideo || null,
+    metaTitle: plain.metaTitle || null,
+    metaKeyword: plain.metaKeyword || null,
+    metaDescription: plain.metaDescription || null,
     freeShipping: Boolean(plain.freeShipping),
+    prizes: maps.prizes ? prizesFor(plain.prizeIds, maps.prizes) : [],
     inStock: stock > 0,
     status: plain.status,
   };
+};
+
+// Slugs used by more than one live product (saved before slugs were made unique).
+const getSharedSlugs = async (slugs) => {
+  const clean = [...new Set(slugs.filter(Boolean))];
+  if (!clean.length) return new Set();
+  const rows = await Product.findAll({
+    attributes: ["slug", [db.sequelize.fn("COUNT", db.sequelize.col("Id")), "count"]],
+    where: { slug: { [Op.in]: clean }, status: { [Op.ne]: "Inactive" } },
+    group: ["slug"],
+    paranoid: true,
+    raw: true,
+  });
+  return new Set(rows.filter((row) => Number(row.count) > 1).map((row) => row.slug));
 };
 
 const getStorefrontProducts = async (options = {}) => {
@@ -685,38 +734,50 @@ const getStorefrontProducts = async (options = {}) => {
     (product.variations || []).map((variation) => variation.colorId),
   );
 
-  const [categories, subcategories, childcategories, colors] = await Promise.all([
+  const [categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs] = await Promise.all([
     getNameMap(db.category, products.map((product) => product.categoryId)),
     getNameMap(db.subcategory, products.map((product) => product.subcategoryId)),
     getNameMap(db.childcategory, products.map((product) => product.childcategoryId)),
     getNameMap(db.color, variationColorIds),
+    getPrizeMap(products.flatMap((product) => parsePrizeIds(product.prizeIds) || [])),
+    getNameMap(db.brand, products.map((product) => product.brandId)),
+    getSharedSlugs(products.map((product) => product.slug)),
   ]);
 
   return {
     products: products.map((product) =>
-      toStorefrontProduct(product, { categories, subcategories, childcategories, colors }),
+      toStorefrontProduct(product, { categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs }),
     ),
     meta: { total, page, limit },
   };
 };
 
-const getStorefrontProductById = async (id) => {
+// Accepts the numeric Id (old links) or the product slug.
+const getStorefrontProductById = async (idOrSlug) => {
+  const key = String(idOrSlug || "").trim();
   const product = await Product.findOne({
-    where: { Id: id, status: { [Op.ne]: "Inactive" } },
+    where: {
+      ...(/^\d+$/.test(key) ? { Id: Number(key) } : { slug: key }),
+      status: { [Op.ne]: "Inactive" },
+    },
     include: [{ model: Variation, as: "variations" }],
+    order: [["Id", "ASC"]],
     paranoid: true,
   });
   if (!product) return null;
 
   const variationColorIds = (product.variations || []).map((variation) => variation.colorId);
-  const [categories, subcategories, childcategories, colors] = await Promise.all([
+  const [categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs] = await Promise.all([
     getNameMap(db.category, [product.categoryId]),
     getNameMap(db.subcategory, [product.subcategoryId]),
     getNameMap(db.childcategory, [product.childcategoryId]),
     getNameMap(db.color, variationColorIds),
+    getPrizeMap(parsePrizeIds(product.prizeIds) || []),
+    getNameMap(db.brand, [product.brandId]),
+    getSharedSlugs([product.slug]),
   ]);
 
-  return toStorefrontProduct(product, { categories, subcategories, childcategories, colors });
+  return toStorefrontProduct(product, { categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs });
 };
 
 const ProductService = {
