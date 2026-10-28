@@ -27,6 +27,8 @@ module.exports = (sequelize, DataTypes) => {
       features:        { type: DataTypes.JSON,          allowNull: true },
       // Scratch card prize Ids given away with this product.
       prizeIds:        { type: DataTypes.JSON,          allowNull: true },
+      // Product Ids given away free with this product (any status).
+      giftProductIds:  { type: DataTypes.JSON,          allowNull: true },
       bestDeals:       { type: DataTypes.BOOLEAN,       allowNull: true, defaultValue: false },
       freeShipping:    { type: DataTypes.BOOLEAN,       allowNull: true, defaultValue: false },
       stockId:         { type: DataTypes.INTEGER(10),   allowNull: true },

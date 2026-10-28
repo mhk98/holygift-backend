@@ -308,7 +308,7 @@ const insertIntoDB = async (data, files = []) => {
     productVideo, advanceAmount, stockAlert,
     description, shortDescription,
     metaTitle, metaKeyword, metaDescription,
-    giftTitle, giftPrice, prizeIds,
+    giftTitle, giftPrice, prizeIds, giftProductIds,
     bestDeals, freeShipping, status,
     variations: variationsRaw,
     purchaseEnabled, supplierId, payAmount, purchaseDate,
@@ -337,6 +337,7 @@ const insertIntoDB = async (data, files = []) => {
     giftPrice:       giftPrice       ? Number(giftPrice)       : null,
     images:          imagePaths.length ? imagePaths : null,
     prizeIds:        parsePrizeIds(prizeIds),
+    giftProductIds:  parsePrizeIds(giftProductIds),
     bestDeals:       bestDeals === 'true'    || bestDeals === true,
     freeShipping:    freeShipping === 'true' || freeShipping === true,
     status:          status || "Active",
@@ -474,7 +475,7 @@ const updateOneFromDB = async (id, payload, files = []) => {
     productVideo, advanceAmount, stockAlert,
     description, shortDescription,
     metaTitle, metaKeyword, metaDescription,
-    giftTitle, giftPrice, prizeIds,
+    giftTitle, giftPrice, prizeIds, giftProductIds,
     bestDeals, freeShipping, status,
     variations: variationsRaw,
     keptImages: keptImagesRaw,
@@ -514,6 +515,7 @@ const updateOneFromDB = async (id, payload, files = []) => {
     };
     // Fields the admin form no longer (or not yet) sends keep their saved value.
     if (prizeIds !== undefined) data.prizeIds = parsePrizeIds(prizeIds);
+    if (giftProductIds !== undefined) data.giftProductIds = parsePrizeIds(giftProductIds);
     if (advanceAmount !== undefined) data.advanceAmount = advanceAmount ? Number(advanceAmount) : null;
     if (giftTitle !== undefined) data.giftTitle = giftTitle || null;
     if (giftPrice !== undefined) data.giftPrice = giftPrice ? Number(giftPrice) : null;
@@ -601,6 +603,46 @@ const uniqueList = (items) => {
   });
 };
 
+// Gift products by Id with their image, price and variants. Inactive products count too:
+// a product kept off the shop can still be handed out as a gift.
+const getGiftProductMap = async (ids) => {
+  const cleanIds = [...new Set(ids.map(Number).filter((id) => id > 0))];
+  if (!cleanIds.length) return new Map();
+  const products = await Product.findAll({
+    where: { Id: { [Op.in]: cleanIds } },
+    include: [{ model: Variation, as: "variations" }],
+    paranoid: true,
+  });
+  return new Map(products.map((product) => {
+    const plain = product.toJSON();
+    const image = [plain.file, ...parseJsonArray(plain.images), ...parseJsonArray(plain.gallery)].find(Boolean) || null;
+    const variants = (plain.variations || [])
+      .filter((variation) => variationSalePrice(variation) > 0)
+      .sort((a, b) => Number(a.Id) - Number(b.Id))
+      .map((variation) => {
+        const options = getVariationOptions(variation);
+        return {
+          id: variation.Id,
+          label: Object.values(options).join(" / "),
+          price: variationSalePrice(variation),
+          image: variation.colorImage || null,
+          inStock: variation.availability !== "out of stock" && Number(variation.stock || 0) > 0,
+        };
+      });
+    const prices = variants.map((variant) => variant.price);
+    return [Number(plain.Id), {
+      Id: plain.Id,
+      name: plain.name,
+      image,
+      price: prices.length ? Math.min(...prices) : 0,
+      variants,
+    }];
+  }));
+};
+
+const giftProductsFor = (giftProductIds, giftProductMap) =>
+  (parsePrizeIds(giftProductIds) || []).map((id) => giftProductMap.get(id)).filter(Boolean);
+
 const toStorefrontProduct = (product, maps = {}) => {
   const plain = product.toJSON ? product.toJSON() : product;
   const variations = (plain.variations || [])
@@ -683,6 +725,7 @@ const toStorefrontProduct = (product, maps = {}) => {
     metaDescription: plain.metaDescription || null,
     freeShipping: Boolean(plain.freeShipping),
     prizes: maps.prizes ? prizesFor(plain.prizeIds, maps.prizes) : [],
+    giftProducts: maps.giftProducts ? giftProductsFor(plain.giftProductIds, maps.giftProducts) : [],
     inStock: stock > 0,
     status: plain.status,
   };
@@ -734,7 +777,7 @@ const getStorefrontProducts = async (options = {}) => {
     (product.variations || []).map((variation) => variation.colorId),
   );
 
-  const [categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs] = await Promise.all([
+  const [categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs, giftProducts] = await Promise.all([
     getNameMap(db.category, products.map((product) => product.categoryId)),
     getNameMap(db.subcategory, products.map((product) => product.subcategoryId)),
     getNameMap(db.childcategory, products.map((product) => product.childcategoryId)),
@@ -742,11 +785,12 @@ const getStorefrontProducts = async (options = {}) => {
     getPrizeMap(products.flatMap((product) => parsePrizeIds(product.prizeIds) || [])),
     getNameMap(db.brand, products.map((product) => product.brandId)),
     getSharedSlugs(products.map((product) => product.slug)),
+    getGiftProductMap(products.flatMap((product) => parsePrizeIds(product.giftProductIds) || [])),
   ]);
 
   return {
     products: products.map((product) =>
-      toStorefrontProduct(product, { categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs }),
+      toStorefrontProduct(product, { categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs, giftProducts }),
     ),
     meta: { total, page, limit },
   };
@@ -767,7 +811,7 @@ const getStorefrontProductById = async (idOrSlug) => {
   if (!product) return null;
 
   const variationColorIds = (product.variations || []).map((variation) => variation.colorId);
-  const [categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs] = await Promise.all([
+  const [categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs, giftProducts] = await Promise.all([
     getNameMap(db.category, [product.categoryId]),
     getNameMap(db.subcategory, [product.subcategoryId]),
     getNameMap(db.childcategory, [product.childcategoryId]),
@@ -775,9 +819,10 @@ const getStorefrontProductById = async (idOrSlug) => {
     getPrizeMap(parsePrizeIds(product.prizeIds) || []),
     getNameMap(db.brand, [product.brandId]),
     getSharedSlugs([product.slug]),
+    getGiftProductMap(parsePrizeIds(product.giftProductIds) || []),
   ]);
 
-  return toStorefrontProduct(product, { categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs });
+  return toStorefrontProduct(product, { categories, subcategories, childcategories, colors, prizes, brands, sharedSlugs, giftProducts });
 };
 
 const ProductService = {

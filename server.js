@@ -159,13 +159,13 @@ const limiterDefaults = {
 // Strict limiter for auth endpoints
 const authLimiter = rateLimit({
   ...limiterDefaults,
-  windowMs: 5 * 60 * 1000, // 5 minutes
+  windowMs: 1 * 60 * 1000, // 1 minute
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
     status: "error",
-    message: "Too many attempts. Try again in 15 minutes.",
+    message: "Too many attempts. Try again in 1 minute.",
   },
   skipSuccessfulRequests: true,
 });
@@ -173,7 +173,7 @@ const authLimiter = rateLimit({
 // General API limiter
 const apiLimiter = rateLimit({
   ...limiterDefaults,
-  windowMs: 60 * 1000, // 1 minute
+  windowMs: 1 * 60 * 1000, // 1 minute
   max: 200,
   standardHeaders: true,
   legacyHeaders: false,
@@ -188,7 +188,7 @@ app.use(
   "/api/v1/tracking/events",
   rateLimit({
     ...limiterDefaults,
-    windowMs: 60 * 1000,
+    windowMs: 1 * 60 * 1000, // 1 minute
     max: 60,
     standardHeaders: true,
     legacyHeaders: false,

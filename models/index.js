@@ -406,6 +406,7 @@ const ensureProductStatusNoteColumns = async () => {
   });
   await maybeAdd("brandId", { type: DataTypes.INTEGER(10), allowNull: true });
   await maybeAdd("prizeIds", { type: DataTypes.JSON, allowNull: true });
+  await maybeAdd("giftProductIds", { type: DataTypes.JSON, allowNull: true });
   await maybeAdd("productVideo", {
     type: DataTypes.STRING(500),
     allowNull: true,
@@ -1120,6 +1121,7 @@ db.ready = db.sequelize
     await ensureScratchCardColumns();
     await ensureFacebookPixelColumns();
     await require("../app/modules/scratchCardPrize/scratchCardPrize.service").seedDefaultPrizes();
+    await require("../app/modules/attribute/attribute.service").seedColorAttribute();
     console.log("Connection re-synced successfully");
   })
   .catch((err) => {

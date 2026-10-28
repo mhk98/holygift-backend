@@ -12,10 +12,12 @@ function setup() {
     async findAll(options) {
       if (options.limit) { listWhere = options.where; return []; }
       if (options.attributes.includes('courierStatus')) return [
-        { status: 'In Transit', courierStatus: 'In Transit' },
-        { status: 'On Way To Sorting Hub', courierStatus: 'On Way To Sorting Hub' },
-        { status: 'In Courier', courierStatus: 'Pending' },
-        { status: 'Received At Last Mile Hub', courierStatus: null },
+        { courier: 'Pathao', status: 'In Transit', courierStatus: 'In Transit' },
+        { courier: 'Pathao', status: 'On Way To Sorting Hub', courierStatus: 'On Way To Sorting Hub' },
+        { courier: 'Pathao', status: 'In Courier', courierStatus: 'Pending' },
+        { courier: 'Pathao', status: 'Received At Last Mile Hub', courierStatus: null },
+        { courier: 'Steadfast', status: 'In Review', courierStatus: 'in_review' },
+        { courier: 'Steadfast', status: 'In Courier', courierStatus: 'pending' },
       ];
       return [];
     },
@@ -35,7 +37,27 @@ function setup() {
 test('courier options include every stored display and raw status without duplicates', async () => {
   const { get } = setup();
   const result = await get({}, {}, { role: 'Admin' });
-  assert.deepEqual(Array.from(result.meta.courierStatuses), ['In Courier', 'In Transit', 'On Way To Sorting Hub', 'Pending', 'Received At Last Mile Hub']);
+  assert.deepEqual(Array.from(result.meta.courierStatuses), ['In Courier', 'In Review', 'In Transit', 'On Way To Sorting Hub', 'Pending', 'Received At Last Mile Hub', 'in_review', 'pending']);
+});
+
+test('courier options are also listed per courier by the status the card shows', async () => {
+  const { get } = setup();
+  const { courierStatusesByCourier } = (await get({}, {}, { role: 'Admin' })).meta;
+  assert.deepEqual(Array.from(courierStatusesByCourier.Pathao), ['In Courier', 'In Transit', 'On Way To Sorting Hub', 'Received At Last Mile Hub']);
+  assert.deepEqual(Array.from(courierStatusesByCourier.Steadfast), ['In Courier', 'In Review']);
+});
+
+test('a courier-scoped status only matches that courier', async () => {
+  const api = setup();
+  await api.get({ courierStatus: JSON.stringify(['courierStatus:Steadfast:In Courier', 'courierStatus:Pathao:In Transit']) }, {}, { role: 'Admin' });
+  const [steadfast, pathao] = api.where()[Op.and][0][Op.or];
+  assert.equal(steadfast.courier, 'Steadfast');
+  assert.equal(steadfast[Op.or][0].status, 'In Courier');
+  assert.equal(pathao.courier, 'Pathao');
+  assert.equal(pathao[Op.or][1].courierStatus, 'In Transit');
+  for (const bad of ['courierStatus:eCourier:Delivered', 'courierStatus:Pathao:', 'courierStatus:Pathao', 'courierStage:eCourier:delivered', 'courierStage:Pathao:']) {
+    await assert.rejects(api.get({ courierStatus: bad }, {}, { role: 'Admin' }));
+  }
 });
 
 test('multi-status filters use OR and preserve agent scope and count query', async () => {
@@ -62,4 +84,29 @@ test('legacy single filters, mixed selections and clearing work; malformed filte
   for (const value of ['[bad', '[null]', '[1]', '[""]', 'bad']) {
     await assert.rejects(api.get({ courierStatus: value }, {}, { role: 'Admin' }), error => error.statusCode === 400);
   }
+});
+
+test('a courier-scoped stage only looks at that courier', async () => {
+  let pairsWhere;
+  const db = { sequelize: Sequelize, scratchCard: {
+    async findAll(options) {
+      if (options.limit) return [];
+      if (options.group?.length === 2 && options.group[0] === 'courier') {
+        pairsWhere = options.where;
+        return [{ courier: 'Steadfast', courierStatus: 'delivered' }];
+      }
+      return [];
+    },
+    async count() { return 0; },
+  } };
+  const file = require.resolve('../app/modules/scratchCard/scratchCard.service');
+  const localRequire = createRequire(file);
+  const context = { module: { exports: {} }, require(name) {
+    if (name === '../../../models') return db;
+    if (name === './scratchCard.courier') return { courierStage: (c, s) => (s === 'delivered' ? 'delivered' : 'in_courier') };
+    return localRequire(name);
+  } };
+  vm.runInNewContext(fs.readFileSync(file, 'utf8'), context);
+  await context.module.exports.getAllFromDB({ courierStatus: 'courierStage:Steadfast:delivered' }, {}, { role: 'Admin' });
+  assert.equal(pairsWhere.courier, 'Steadfast');
 });

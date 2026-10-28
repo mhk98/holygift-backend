@@ -194,7 +194,10 @@ const assignToAgent = async (ids, agentId, actor) => {
 };
 
 // The courier status filter: "none" = not sent yet, "courier:<name>" = sent to
-// that courier, "stage:<stage>" = see courierStage, "status:<status>" = one exact status.
+// that courier, "stage:<stage>" = see courierStage, "status:<status>" = one exact status,
+// "courierStatus:<name>:<status>" and "courierStage:<name>:<stage>" = the same, on that courier's cards only.
+const COURIERS = ["Steadfast", "Pathao"];
+
 const courierStatusCondition = async (value) => {
   const [kind, ...rest] = String(value || "").split(":");
   const arg = rest.join(":");
@@ -204,19 +207,51 @@ const courierStatusCondition = async (value) => {
     courier: { [Op.ne]: null },
     [Op.or]: [{ status: arg }, { courierStatus: arg }],
   };
-  if (kind === "stage" && arg) {
+  if (kind === "courierStatus") {
+    const [name, ...status] = arg.split(":");
+    const exact = status.join(":");
+    if (!COURIERS.includes(name) || !exact) throw new ApiError(400, "Invalid courier status filter");
+    return { courier: name, [Op.or]: [{ status: exact }, { courierStatus: exact }] };
+  }
+  if (kind === "courierStage" && !COURIERS.includes(arg.split(":")[0])) {
+    throw new ApiError(400, "Invalid courier status filter");
+  }
+  if ((kind === "stage" || kind === "courierStage") && arg) {
+    const [name, stage] = kind === "stage" ? [null, arg] : [arg.split(":")[0], arg.split(":").slice(1).join(":")];
+    if (!stage) throw new ApiError(400, "Invalid courier status filter");
     // Couriers report many raw statuses, so match the ones in use that fall in this stage.
     const pairs = await ScratchCard().findAll({
       attributes: ["courier", "courierStatus"],
-      where: { courier: { [Op.ne]: null } },
+      where: { courier: name || { [Op.ne]: null } },
       group: ["courier", "courierStatus"],
       raw: true,
     });
-    const matches = pairs.filter((p) => courierStage(p.courier, p.courierStatus) === arg);
+    const matches = pairs.filter((p) => courierStage(p.courier, p.courierStatus) === stage);
     if (!matches.length) return { Id: null };
     return { [Op.or]: matches.map((p) => ({ courier: p.courier, courierStatus: p.courierStatus })) };
   }
   throw new ApiError(400, "Invalid courier status filter");
+};
+
+// Mirrors effectiveArea in SQL: an admin's choice wins, otherwise Dhaka in the address.
+const deliveryAreaCondition = (area) => {
+  const mentionsDhaka = {
+    [Op.or]: [
+      db.sequelize.where(db.sequelize.fn("LOWER", db.sequelize.col("address")), { [Op.like]: "%dhaka%" }),
+      { address: { [Op.like]: "%ঢাকা%" } },
+    ],
+  };
+  return {
+    [Op.or]: [
+      { deliveryArea: area },
+      {
+        [Op.and]: [
+          { [Op.or]: [{ deliveryArea: null }, { deliveryArea: { [Op.notIn]: DELIVERY_AREAS } }] },
+          area === "inside" ? mentionsDhaka : { [Op.not]: mentionsDhaka },
+        ],
+      },
+    ],
+  };
 };
 
 const getAllFromDB = async (filters, options, user) => {
@@ -228,7 +263,13 @@ const getAllFromDB = async (filters, options, user) => {
   const phone = String(filters?.phone || "").trim();
   const prize = String(filters?.prize || "").trim();
   const andConditions = [];
-  if (filters?.crossProductId !== undefined && filters.crossProductId !== "") {
+  // "any"/"none" split claims with and without cross products; a number finds one product.
+  if (filters?.crossProductId === "any" || filters?.crossProductId === "none") {
+    andConditions.push(db.sequelize.where(
+      db.sequelize.fn("COALESCE", db.sequelize.fn("JSON_LENGTH", db.sequelize.col("crossProducts")), 0),
+      filters.crossProductId === "any" ? { [Op.gt]: 0 } : 0,
+    ));
+  } else if (filters?.crossProductId !== undefined && filters.crossProductId !== "") {
     const id = Number(filters.crossProductId);
     if (!/^\d+$/.test(String(filters.crossProductId)) || !Number.isSafeInteger(id) || id <= 0) {
       throw new ApiError(400, "Invalid cross product filter");
@@ -237,6 +278,10 @@ const getAllFromDB = async (filters, options, user) => {
       db.sequelize.fn("JSON_CONTAINS", db.sequelize.col("crossProducts"), JSON.stringify({ Id: id })),
       1,
     ));
+  }
+  if (filters?.deliveryArea) {
+    if (!DELIVERY_AREAS.includes(filters.deliveryArea)) throw new ApiError(400, "Invalid delivery area filter");
+    andConditions.push(deliveryAreaCondition(filters.deliveryArea));
   }
   // An agent only ever sees the cards assigned to them.
   if (isAgent(user)) {
@@ -291,7 +336,7 @@ const getAllFromDB = async (filters, options, user) => {
     ScratchCard().count({ where }),
     ScratchCard().findAll({ attributes: ["status"], where: { courier: null }, group: ["status"], raw: true }),
     // Courier statuses vary, so the courier status filter offers whatever is in use.
-    ScratchCard().findAll({ attributes: ["status", "courierStatus"], where: { courier: { [Op.ne]: null } }, group: ["status", "courierStatus"], raw: true }),
+    ScratchCard().findAll({ attributes: ["courier", "status", "courierStatus"], where: { courier: { [Op.ne]: null } }, group: ["courier", "status", "courierStatus"], raw: true }),
     getDeliveryCharges(),
   ]);
   const statuses = [...new Set([...SCRATCH_CARD_STATUSES, ...statusRows.map((r) => r.status).filter(Boolean)])];
@@ -301,6 +346,11 @@ const getAllFromDB = async (filters, options, user) => {
       count, page, limit, statuses, deliveryCharges,
       courierStatuses: [...new Set(courierStatusRows.flatMap((r) => [r.status, r.courierStatus])
         .filter((value) => typeof value === "string" && value.trim()))].sort(),
+      // Each courier names its statuses differently, so the filter lists them per courier
+      // by the status the card shows.
+      courierStatusesByCourier: Object.fromEntries(COURIERS.map((name) => [name,
+        [...new Set(courierStatusRows.filter((r) => r.courier === name).map((r) => r.status)
+          .filter((value) => typeof value === "string" && value.trim()))].sort()])),
     },
     // The delivery charge the courier will collect; a sent card shows what was actually sent.
     data: await withCrossProductPrices(rows.map((row) => {

@@ -41,6 +41,15 @@ const getAllFromDB = async (filters, options) => {
   return { meta: { count, page, limit }, data: result };
 };
 
+// Colors used to have their own menu; they now live in a "Color" attribute like any
+// other option. Copies the saved colors over once (a deleted "Color" stays deleted).
+const seedColorAttribute = async () => {
+  if (await Attribute.count({ where: { name: "Color" }, paranoid: false })) return;
+  const colors = await db.color.findAll({ attributes: ["name"], order: [["Id", "ASC"]], raw: true });
+  const names = [...new Set(colors.map((color) => String(color.name || "").trim()).filter(Boolean))];
+  if (names.length) await Attribute.create({ name: "Color", values: names });
+};
+
 const getAllFromDBWithoutQuery = async () => {
   return await Attribute.findAll({ paranoid: true, order: [["createdAt", "DESC"]] });
 };
@@ -58,7 +67,7 @@ const deleteIdFromDB = async (id) => {
 };
 
 const AttributeService = {
-  insertIntoDB, getAllFromDB, getAllFromDBWithoutQuery, getDataById, updateOneFromDB, deleteIdFromDB,
+  insertIntoDB, getAllFromDB, getAllFromDBWithoutQuery, seedColorAttribute, getDataById, updateOneFromDB, deleteIdFromDB,
 };
 
 module.exports = AttributeService;

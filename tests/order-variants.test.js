@@ -9,8 +9,8 @@ function load(path, db) {
     if (name === '../../../models') return db;
     if (name.includes('ApiError')) return class extends Error { constructor(code, message) { super(message); this.statusCode = code; } };
     if (name.includes('shared/productVariants')) return require('../shared/productVariants');
-    // Products in these fixtures carry no scratch card prizes.
-    if (name.includes('scratchCardPrize.service')) return { parsePrizeIds: () => null, getPrizeMap: async () => new Map(), prizesFor: () => [] };
+    // Products in these fixtures carry no scratch card prizes; gift product Ids are plain arrays.
+    if (name.includes('scratchCardPrize.service')) return { parsePrizeIds: (ids) => (Array.isArray(ids) ? ids : null), getPrizeMap: async () => new Map(), prizesFor: () => [] };
     return require(name);
   } };
   vm.runInNewContext(fs.readFileSync(require.resolve(path), 'utf8'), context);
@@ -28,6 +28,11 @@ function pricingDb() {
     ] },
     { Id: 2, name: 'Oud', status: 'Active', variations: [variation(21, null, 1100)] },
     { Id: 3, name: 'Free Attar', status: 'Active', freeShipping: true, variations: [variation(31, null, 400)] },
+    { Id: 4, name: 'Honey', status: 'Active', giftProductIds: [5], variations: [variation(41, null, 1199)] },
+    { Id: 5, name: 'Honey Gift Box', status: 'Inactive', file: 'box.jpg', variations: [
+      variation(51, { Size: 'L' }, 900),
+      variation(52, { Size: 'S' }, 700),
+    ] },
   ];
   return {
     product: { async findAll({ where }) {
@@ -56,6 +61,26 @@ test('website order prices come from the selected variant, not the client', asyn
   // Single-variant product without variantId (old carts) resolves to its only variant.
   assert.equal(result.items[1].price, 1100);
   assert.equal(result.items[1].variantId, 21);
+});
+
+test('gift products are charged once per order as their own line', async () => {
+  const { priceOrderItems } = load('../app/modules/order/orderPricing', pricingDb());
+  // A multi-variant gift needs the customer's pick.
+  await assert.rejects(priceOrderItems({ items: [{ id: 4, qty: 1 }] }), /variant/);
+  const result = await priceOrderItems({ giftVariants: { 5: 51 }, items: [
+    { id: 4, qty: 2 },
+    // A client-sent gift line is dropped and rebuilt.
+    { id: 5, variantId: 52, qty: 3, price: 1, gift: true },
+  ] });
+  assert.equal(result.items.length, 2);
+  const gift = result.items[1];
+  assert.equal(gift.id, 5);
+  assert.equal(gift.variantId, 51);
+  assert.equal(gift.variant, 'Size: L');
+  assert.equal(gift.price, 900);
+  assert.equal(gift.qty, 1);
+  assert.equal(gift.gift, true);
+  assert.equal(gift.image, 'box.jpg');
 });
 
 test('multi-variant product requires a variant and enough stock', async () => {

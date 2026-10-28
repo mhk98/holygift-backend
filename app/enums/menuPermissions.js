@@ -120,7 +120,7 @@ const HOLYDEEN_DASHBOARD_MENU_PERMISSIONS = [
 // The section key alone still grants every page in it; once a role has any
 // page key of a section, it gets only the pages it has.
 const MENU_SUB_PERMISSIONS = {
-  products: ["product_manage", "categories", "subcategories", "childcategories", "brands", "colors", "attribute", "barcode", "reviews"],
+  products: ["product_manage", "categories", "subcategories", "childcategories", "brands", "attribute", "barcode", "reviews"],
   supplier: ["supplier_list", "supplier_add", "payment_add", "payment_list"],
   purchase: ["purchase_list", "purchase_add"],
   website_setting: ["general_setting", "order_block", "website_footer", "social_media", "contact", "shipping_charge", "order_status", "create_page"],

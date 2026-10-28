@@ -167,14 +167,58 @@ const priceLandingOrder = async (payload, landingPageId, strict) => {
   return { ...payload, items, deliveryCharge };
 };
 
-const priceWebsiteOrder = async (payload, strict) => {
-  const products = await loadProducts(payload.items.map((item) => item.id));
-  const prizeMap = await getPrizeMap(
-    [...products.values()].flatMap((product) => parsePrizeIds(product.prizeIds) || []),
-  );
-  let allFreeShipping = payload.items.length > 0;
+const firstImage = (product) => {
+  let images = product.images;
+  if (typeof images === "string") {
+    try { images = JSON.parse(images); } catch { images = []; }
+  }
+  return product.file || (Array.isArray(images) ? images[0] : null) || null;
+};
 
-  const items = payload.items.map((item) => {
+// Gift products are charged once per order, whatever their status, at the variant the
+// customer picked (giftVariants: { [giftProductId]: variantId }), and added as their own
+// lines so the total, invoice, courier description and stock include them.
+const giftLinesFor = (products, giftProducts, giftVariants, strict) => {
+  const giftIds = [...new Set([...products.values()].flatMap((product) => parsePrizeIds(product.giftProductIds) || []))];
+  const picks = giftVariants && typeof giftVariants === "object" ? giftVariants : {};
+  return giftIds.flatMap((id) => {
+    const gift = giftProducts.get(id);
+    const priced = (gift?.variations || []).filter((candidate) => variationSalePrice(candidate) > 0);
+    if (!priced.length) return [];
+    let variation = priced.find((candidate) => Number(candidate.Id) === Number(picks[id]));
+    if (variation && strict && !isVariationAvailable(variation, 1)) {
+      throw new ApiError(400, `উপহার "${gift.name}" এর এই variant এর stock নেই`);
+    }
+    if (!variation && priced.length > 1 && strict) {
+      throw new ApiError(400, `উপহার "${gift.name}" এর variant বাছাই করুন`);
+    }
+    // Single-variant gifts (and drafts without a pick) fall back to the cheapest variant.
+    variation = variation || priced.reduce((best, candidate) =>
+      (!best || variationSalePrice(candidate) < variationSalePrice(best) ? candidate : best), null);
+    return [{
+      id: gift.Id,
+      variantId: variation.Id,
+      name: gift.name,
+      image: variation.colorImage || firstImage(gift),
+      ...describeVariation(variation),
+      price: variationSalePrice(variation),
+      qty: 1,
+      gift: true,
+    }];
+  });
+};
+
+const priceWebsiteOrder = async (payload, strict) => {
+  // Gift lines are always rebuilt from the products, never taken from the client.
+  const cartItems = payload.items.filter((item) => !item.gift);
+  const products = await loadProducts(cartItems.map((item) => item.id));
+  const [prizeMap, giftProducts] = await Promise.all([
+    getPrizeMap([...products.values()].flatMap((product) => parsePrizeIds(product.prizeIds) || [])),
+    loadProducts([...products.values()].flatMap((product) => parsePrizeIds(product.giftProductIds) || [])),
+  ]);
+  let allFreeShipping = cartItems.length > 0;
+
+  const items = cartItems.map((item) => {
     const qty = toQty(item.qty);
     const product = products.get(Number(item.id));
     const fail = (message) => {
@@ -210,6 +254,8 @@ const priceWebsiteOrder = async (payload, strict) => {
       prizes: prizesFor(product.prizeIds, prizeMap).map(({ Id, name, nameBn }) => ({ Id, name, nameBn })),
     };
   });
+
+  items.push(...giftLinesFor(products, giftProducts, payload.giftVariants, strict));
 
   // The storefront only charges delivery once a district is picked; a final order without
   // one (outdated client) is charged the outside-Dhaka rate rather than nothing.
@@ -261,6 +307,7 @@ const resolveStaffItems = async (items = []) => {
       price,
       qty,
       disc,
+      ...(item.gift ? { gift: true } : {}),
     };
     if (!item.id) return base;
 

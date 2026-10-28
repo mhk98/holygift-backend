@@ -1030,7 +1030,7 @@ const applyOrderCoupon = async (payload = {}) => {
 
 const buildItemsProductName = (items = []) =>
   items
-    .map((item) => `${item.name}${item.variant ? ` (${item.variant})` : ""} x${item.qty || 1}`)
+    .map((item) => `${item.gift ? "উপহার: " : ""}${item.name}${item.variant ? ` (${item.variant})` : ""} x${item.qty || 1}`)
     .join(", ")
     .slice(0, 255);
 
