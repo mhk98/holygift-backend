@@ -75,7 +75,10 @@ const pathaoPayload = (card, config, codAmount) => courier.compactObject({
 const loadSendable = async (ids, provider) => {
   const cardIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))];
   if (!cardIds.length) throw new ApiError(400, "Scratch card IDs are required");
-  if (cardIds.length > 500) throw new ApiError(400, "At most 500 scratch cards can be sent at once");
+  // Steadfast also looks every card up before booking, so a big batch would
+  // outlast the request; the admin sends in chunks of this size.
+  const limit = provider === "Steadfast" ? 100 : 500;
+  if (cardIds.length > limit) throw new ApiError(400, `At most ${limit} scratch cards can be sent to ${provider} at once`);
 
   const cards = await ScratchCard().findAll({ where: { Id: { [Op.in]: cardIds } } });
   const byId = new Map(cards.map((card) => [card.Id, card]));
@@ -105,8 +108,32 @@ const loadSendable = async (ids, provider) => {
   return { ready: sendable, skipped };
 };
 
+// A send whose reply never reached us leaves the parcel booked at Steadfast
+// while the card still reads Approved here; sending it again would book a
+// second parcel. Steadfast answers 401 for an invoice it has never seen.
+const LOOKUP_CONCURRENCY = 3;
+const withoutSteadfastParcel = async (cards, skipped) => {
+  const fresh = [];
+  for (let start = 0; start < cards.length; start += LOOKUP_CONCURRENCY) {
+    await Promise.all(cards.slice(start, start + LOOKUP_CONCURRENCY).map(async (card) => {
+      try {
+        const response = await courier.steadfastRequest(`/status_by_invoice/${encodeURIComponent(card.referenceCode)}`);
+        skipped.push({
+          reference: card.referenceCode,
+          message: `Already booked at Steadfast (${displayCourierStatus(response?.delivery_status)}) but its consignment ID was never saved here; do not send it again`,
+        });
+      } catch (error) {
+        if (error.statusCode === 401) fresh.push(card);
+        else skipped.push({ reference: card.referenceCode, message: `Could not check Steadfast for an existing parcel: ${error.message}` });
+      }
+    }));
+  }
+  return cards.filter((card) => fresh.includes(card));
+};
+
 const sendToSteadfast = async (ids) => {
-  const { ready, skipped } = await loadSendable(ids, "Steadfast");
+  const { ready: candidates, skipped } = await loadSendable(ids, "Steadfast");
+  const ready = await withoutSteadfastParcel(candidates, skipped);
   if (!ready.length) return { sent: [], skipped };
 
   const charges = await getDeliveryCharges();
@@ -115,11 +142,12 @@ const sendToSteadfast = async (ids) => {
   const response = await courier.steadfastRequest("/create_order/bulk-order", {
     method: "POST",
     body: { data: JSON.stringify(payloads) },
+    timeoutMs: courier.STEADFAST_BULK_TIMEOUT_MS,
   });
-  const rows = Array.isArray(response) ? response : response?.data || [];
+  const rowFor = courier.steadfastBulkRows(response);
   const sent = [];
   await Promise.all(ready.map(async (card, index) => {
-    const row = rows[index] || {};
+    const row = rowFor(card.referenceCode, index);
     const ok = String(row.status || "").toLowerCase() === "success" || row.tracking_code || row.consignment_id;
     if (!ok) {
       skipped.push({ reference: card.referenceCode, message: row.message || "Steadfast rejected this card" });

@@ -586,17 +586,18 @@ const getPathaoConfig = async () => {
   };
 };
 
-// fetch() rejects with an AbortError when our 15s timer fires; report it as a
-// courier timeout instead of letting it surface as "Internal server error".
+// fetch() rejects with an AbortError when our timer (15s unless the caller
+// asks for more) fires; report it as a courier timeout instead of letting it
+// surface as "Internal server error".
 const courierCooldown = require("./courierCooldown").createCourierCooldown();
-const courierFetch = async (provider, url, options) => {
+const courierFetch = async (provider, url, options, timeoutMs = 15000) => {
   courierCooldown.check(provider);
   let response;
   try {
     response = await fetch(url, options);
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new ApiError(504, `${provider} did not respond within 15 seconds (${new URL(url).origin}). Check the ${provider} API URL in Courier API settings.`);
+      throw new ApiError(504, `${provider} did not respond within ${Math.round(timeoutMs / 1000)} seconds (${new URL(url).origin}). Check the ${provider} API URL in Courier API settings.`);
     }
     throw new ApiError(502, `Could not reach ${provider}: ${error?.cause?.code || error.message}`);
   }
@@ -608,10 +609,23 @@ const courierFetch = async (provider, url, options) => {
   return response;
 };
 
-const steadfastRequest = async (path, { method = "GET", body } = {}) => {
+// Steadfast takes far longer to book a bulk order than to answer a lookup, and
+// giving up early leaves parcels booked there that we never recorded, so bulk
+// callers pass this longer timeout.
+const STEADFAST_BULK_TIMEOUT_MS = 120000;
+
+// Steadfast echoes each parcel's invoice in the bulk reply; matching on it
+// keeps a reordered reply from giving one parcel another's consignment id.
+// A reply without invoices falls back to request order.
+const steadfastBulkRows = (response) => {
+  const rows = Array.isArray(response) ? response : response?.data || [];
+  const byInvoice = new Map(rows.filter((row) => row?.invoice).map((row) => [String(row.invoice), row]));
+  return (invoice, index) => (byInvoice.size ? byInvoice.get(String(invoice)) : rows[index]) || {};
+};
+const steadfastRequest = async (path, { method = "GET", body, timeoutMs = 15000 } = {}) => {
   const config = await getSteadfastConfig();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await courierFetch("Steadfast", `${config.baseUrl}${path}`, {
       method,
@@ -623,7 +637,7 @@ const steadfastRequest = async (path, { method = "GET", body } = {}) => {
         Accept: "application/json",
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
-    });
+    }, timeoutMs);
     const text = await response.text();
     let data;
     try {
@@ -1933,12 +1947,13 @@ const bulkSendOrdersToSteadfastInDB = async (orderIds = [], options = {}) => {
   const response = await steadfastRequest("/create_order/bulk-order", {
     method: "POST",
     body: { data: JSON.stringify(payloadItems.map((item) => item.payload)) },
+    timeoutMs: STEADFAST_BULK_TIMEOUT_MS,
   });
-  const rows = Array.isArray(response) ? response : response?.data || [];
+  const rowFor = steadfastBulkRows(response);
   const sent = [];
 
   await Promise.all(payloadItems.map(async ({ order, payload }, index) => {
-    const row = rows[index] || {};
+    const row = rowFor(payload.invoice, index);
     const successful = String(row.status || "").toLowerCase() === "success" || row.tracking_code || row.consignment_id;
     if (!successful) {
       skipped.push({
@@ -2235,6 +2250,8 @@ const OrderService = {
   // Shared with scratch card prize delivery, which uses the same courier accounts.
   courierClient: {
     steadfastRequest,
+    steadfastBulkRows,
+    STEADFAST_BULK_TIMEOUT_MS,
     getPathaoConfig,
     pathaoToken,
     pathaoRequest,
