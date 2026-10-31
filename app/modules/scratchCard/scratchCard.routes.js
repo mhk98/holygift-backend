@@ -21,6 +21,7 @@ const ADMINS_AND_LEADERS = [...ADMINS, ENUM_USER_ROLE.LEADER];
 router.get(   "/agents", auth(...ADMINS_AND_LEADERS), Controller.getAgents);
 router.post(  "/assign", auth(...ADMINS), Controller.assignToAgent);
 router.post(  "/courier/sync",      auth(...ADMINS_AND_LEADERS), Controller.syncCourierStatus);
+router.post(  "/courier/unlink",    auth(...ADMINS_AND_LEADERS), Controller.unlinkCourier);
 router.post(  "/courier/:provider", auth(...ADMINS_AND_LEADERS), Controller.sendToCourier);
 router.post(  "/create", ...ADMINS_AND_AGENTS, uploadSingle, Controller.createByStaff);
 router.get(   "/",       ...ADMINS_AND_AGENTS, Controller.getAllFromDB);

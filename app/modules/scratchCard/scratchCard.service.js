@@ -283,10 +283,9 @@ const getAllFromDB = async (filters, options, user) => {
     if (!DELIVERY_AREAS.includes(filters.deliveryArea)) throw new ApiError(400, "Invalid delivery area filter");
     andConditions.push(deliveryAreaCondition(filters.deliveryArea));
   }
-  // An agent only ever sees the cards assigned to them.
-  if (isAgent(user)) {
-    andConditions.push({ assignedAgentId: user.Id });
-  } else if (filters?.assignedAgentId === "unassigned") {
+  // An agent sees every card, their own assigned ones first (see `order`);
+  // they can only change their own (updateOneFromDB).
+  if (filters?.assignedAgentId === "unassigned") {
     andConditions.push({ assignedAgentId: null });
   } else if (filters?.assignedAgentId) {
     andConditions.push({ assignedAgentId: Number(filters.assignedAgentId) });
@@ -331,8 +330,13 @@ const getAllFromDB = async (filters, options, user) => {
   const approved = dayRange("approvedAt", filters?.approvedFrom, filters?.approvedTo);
   if (approved) andConditions.push(approved);
   const where = andConditions.length ? { [Op.and]: andConditions } : {};
+  const agentId = isAgent(user) ? Number(user.Id) : null;
+  const order = [
+    ...(agentId ? [[db.sequelize.literal(`CASE WHEN assignedAgentId = ${agentId} THEN 0 ELSE 1 END`), "ASC"]] : []),
+    ["createdAt", "DESC"],
+  ];
   const [data, count, statusRows, courierStatusRows, deliveryCharges] = await Promise.all([
-    ScratchCard().findAll({ where, offset: skip, limit, order: [["createdAt", "DESC"]] }),
+    ScratchCard().findAll({ where, offset: skip, limit, order }),
     ScratchCard().count({ where }),
     ScratchCard().findAll({ attributes: ["status"], where: { courier: null }, group: ["status"], raw: true }),
     // Courier statuses vary, so the courier status filter offers whatever is in use.

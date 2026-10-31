@@ -56,6 +56,11 @@ const syncCourierStatus = catchAsync(async (req, res) => {
   sendResponse(res, { statusCode: 200, success: true, message: "Courier status synced", data: result });
 });
 
+const unlinkCourier = catchAsync(async (req, res) => {
+  const result = await Courier.unlinkSelected(req.body.ids, req.user);
+  sendResponse(res, { statusCode: 200, success: true, message: "Courier unlinked", data: result });
+});
+
 const deleteIdFromDB = catchAsync(async (req, res) => {
   const result = await Service.deleteIdFromDB(req.params.id);
   sendResponse(res, { statusCode: 200, success: true, message: "Scratch card deleted", data: result });
@@ -63,5 +68,5 @@ const deleteIdFromDB = catchAsync(async (req, res) => {
 
 module.exports = {
   checkPhone, trackByPhone, submit, createByStaff, getAllFromDB, updateOneFromDB, deleteIdFromDB, getAgents, assignToAgent,
-  sendToCourier, syncCourierStatus,
+  sendToCourier, syncCourierStatus, unlinkCourier,
 };

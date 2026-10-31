@@ -75,9 +75,8 @@ const pathaoPayload = (card, config, codAmount) => courier.compactObject({
 const loadSendable = async (ids, provider) => {
   const cardIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))];
   if (!cardIds.length) throw new ApiError(400, "Scratch card IDs are required");
-  // Steadfast also looks every card up before booking, so a big batch would
-  // outlast the request; the admin sends in chunks of this size.
-  const limit = provider === "Steadfast" ? 100 : 500;
+  // 500 is Steadfast's bulk-order maximum; the admin sends in chunks of this size.
+  const limit = 500;
   if (cardIds.length > limit) throw new ApiError(400, `At most ${limit} scratch cards can be sent to ${provider} at once`);
 
   const cards = await ScratchCard().findAll({ where: { Id: { [Op.in]: cardIds } } });
@@ -111,17 +110,19 @@ const loadSendable = async (ids, provider) => {
 // A send whose reply never reached us leaves the parcel booked at Steadfast
 // while the card still reads Approved here; sending it again would book a
 // second parcel. Steadfast answers 401 for an invoice it has never seen.
-const LOOKUP_CONCURRENCY = 3;
+const LOOKUP_CONCURRENCY = 5;
 const withoutSteadfastParcel = async (cards, skipped) => {
   const fresh = [];
   for (let start = 0; start < cards.length; start += LOOKUP_CONCURRENCY) {
     await Promise.all(cards.slice(start, start + LOOKUP_CONCURRENCY).map(async (card) => {
       try {
         const response = await courier.steadfastRequest(`/status_by_invoice/${encodeURIComponent(card.referenceCode)}`);
-        skipped.push({
-          reference: card.referenceCode,
-          message: `Already booked at Steadfast (${displayCourierStatus(response?.delivery_status)}) but its consignment ID was never saved here; do not send it again`,
-        });
+        const status = displayCourierStatus(response?.delivery_status);
+        // Steadfast keeps an unlinked card's parcel under the same invoice.
+        const message = String(card.note || "").includes("Unlinked from Steadfast")
+          ? `Was unlinked from Steadfast but its parcel is still there (${status}); Steadfast does not take the same invoice twice, so update that parcel in the Steadfast panel or send this card to Pathao`
+          : `Already booked at Steadfast (${status}) but its consignment ID was never saved here; do not send it again`;
+        skipped.push({ reference: card.referenceCode, message });
       } catch (error) {
         if (error.statusCode === 401) fresh.push(card);
         else skipped.push({ reference: card.referenceCode, message: `Could not check Steadfast for an existing parcel: ${error.message}` });
@@ -263,4 +264,48 @@ const syncSelected = async (ids) => {
   return { synced, failed, notWithCourier: cardIds.length - cards.length };
 };
 
-module.exports = { courierStage, sendToCourier, syncSelected, syncSteadfastStatusInDB, syncPathaoStatusInDB };
+// Unlink a card sent to the wrong courier so it can be sent again. Only our
+// record changes: the parcel stays booked at the courier and has to be
+// cancelled in their panel, so the old consignment is kept in the note.
+const unlinkSelected = async (ids, user) => {
+  const cardIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter(Boolean))];
+  if (!cardIds.length) throw new ApiError(400, "Scratch card IDs are required");
+  const cards = await ScratchCard().findAll({ where: { Id: { [Op.in]: cardIds } } });
+  const byId = new Map(cards.map((card) => [card.Id, card]));
+  const unlinked = [];
+  const skipped = [];
+  for (const id of cardIds) {
+    const card = byId.get(id);
+    const ref = card?.referenceCode || id;
+    if (!card) skipped.push({ reference: ref, message: "Scratch card not found" });
+    else if (!card.courier) skipped.push({ reference: ref, message: "Not sent to any courier" });
+    else if (courierStage(card.courier, card.courierStatus) === "delivered") {
+      skipped.push({ reference: ref, message: `Already delivered by ${card.courier}` });
+    } else {
+      const previous = card.courier;
+      const parcel = [
+        card.consignmentId && `CID ${card.consignmentId}`,
+        card.trackingCode && card.trackingCode !== card.consignmentId && `Tracking ${card.trackingCode}`,
+      ].filter(Boolean).join(", ") || "no consignment ID";
+      const by = [user?.FirstName, user?.LastName].filter(Boolean).join(" ").trim() || user?.Email || `User ${user?.Id}`;
+      const line = `[${new Date().toISOString().slice(0, 16).replace("T", " ")}] Unlinked from ${previous} (${parcel}, status ${card.status}) by ${by}`;
+      await card.update({
+        courier: null,
+        consignmentId: null,
+        trackingCode: null,
+        courierStatus: null,
+        courierFinal: false,
+        courierSentAt: null,
+        courierCodAmount: null,
+        // Only Approved cards can be sent, so this puts it back in the queue.
+        status: "Approved",
+        approvedAt: card.approvedAt || new Date(),
+        note: card.note ? `${card.note}\n${line}` : line,
+      });
+      unlinked.push({ reference: card.referenceCode, courier: previous });
+    }
+  }
+  return { unlinked, skipped };
+};
+
+module.exports = { courierStage, sendToCourier, syncSelected, unlinkSelected, syncSteadfastStatusInDB, syncPathaoStatusInDB };

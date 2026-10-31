@@ -7,10 +7,10 @@ const Sequelize = require('sequelize');
 const { Op } = Sequelize;
 
 function setup() {
-  let listWhere, countWhere;
+  let listWhere, countWhere, listOrder;
   const db = { sequelize: Sequelize, scratchCard: {
     async findAll(options) {
-      if (options.limit) { listWhere = options.where; return []; }
+      if (options.limit) { listWhere = options.where; listOrder = options.order; return []; }
       if (options.attributes.includes('courierStatus')) return [
         { courier: 'Pathao', status: 'In Transit', courierStatus: 'In Transit' },
         { courier: 'Pathao', status: 'On Way To Sorting Hub', courierStatus: 'On Way To Sorting Hub' },
@@ -31,7 +31,7 @@ function setup() {
     return localRequire(name);
   } };
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), context);
-  return { get: context.module.exports.getAllFromDB, where: () => listWhere, count: () => countWhere };
+  return { get: context.module.exports.getAllFromDB, where: () => listWhere, order: () => listOrder, count: () => countWhere };
 }
 
 test('courier options include every stored display and raw status without duplicates', async () => {
@@ -60,12 +60,12 @@ test('a courier-scoped status only matches that courier', async () => {
   }
 });
 
-test('multi-status filters use OR and preserve agent scope and count query', async () => {
+test('multi-status filters use OR and keep the count query in step', async () => {
   const api = setup();
   await api.get({ courierStatus: JSON.stringify(['status:In Transit', 'status:On Way To Sorting Hub']) }, { page: 2 }, { Id: 9, role: 'Agent' });
   const conditions = api.where()[Op.and];
-  assert.equal(conditions[0].assignedAgentId, 9);
-  const selected = conditions[1][Op.or];
+  assert.equal(conditions.length, 1);
+  const selected = conditions[0][Op.or];
   assert.equal(selected.length, 2);
   assert.equal(selected[0][Op.or][0].status, 'In Transit');
   assert.equal(selected[0][Op.or][1].courierStatus, 'In Transit');
@@ -109,4 +109,15 @@ test('a courier-scoped stage only looks at that courier', async () => {
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), context);
   await context.module.exports.getAllFromDB({ courierStatus: 'courierStage:Steadfast:delivered' }, {}, { role: 'Admin' });
   assert.equal(pairsWhere.courier, 'Steadfast');
+});
+
+test('an agent sees every card with their own assigned ones first', async () => {
+  const api = setup();
+  await api.get({}, {}, { Id: 9, role: 'Agent' });
+  assert.equal(Reflect.ownKeys(api.where()).length, 0);
+  const [mineFirst, newest] = api.order();
+  assert.equal(mineFirst[0].val, 'CASE WHEN assignedAgentId = 9 THEN 0 ELSE 1 END');
+  assert.deepEqual(Array.from(newest), ['createdAt', 'DESC']);
+  await api.get({}, {}, { Id: 1, role: 'Admin' });
+  assert.deepEqual(Array.from(api.order()[0]), ['createdAt', 'DESC']);
 });
